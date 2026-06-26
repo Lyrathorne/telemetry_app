@@ -1,5 +1,7 @@
 import random
+import struct
 import sys
+from dataclasses import dataclass
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent
@@ -15,6 +17,51 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+F1_2018_PACKET_FORMAT = 2018
+F1_2018_HEADER_FORMAT = "<HBBQfIB"
+F1_2018_HEADER_SIZE = struct.calcsize(F1_2018_HEADER_FORMAT)
+
+F1_2018_NUMBER_OF_CARS = 20
+F1_2018_CAR_TELEMETRY_PACKET_ID = 6
+F1_2018_CAR_TELEMETRY_PACKET_SIZE = 1085
+F1_2018_CAR_TELEMETRY_RECORD_SIZE = 53
+
+CAR_SPEED_OFFSET = 0
+CAR_THROTTLE_OFFSET = 2
+CAR_BRAKE_OFFSET = 4
+CAR_GEAR_OFFSET = 6
+CAR_RPM_OFFSET = 7
+
+PACKET_NAMES = {
+    0: "Motion",
+    1: "Session",
+    2: "Lap Data",
+    3: "Event",
+    4: "Participants",
+    5: "Car Setups",
+    6: "Car Telemetry",
+    7: "Car Status",
+}
+
+
+@dataclass
+class PacketHeader:
+    packet_format: int
+    packet_version: int
+    packet_id: int
+    session_time: float
+    frame_identifier: int
+    player_car_index: int
+
+
+@dataclass
+class TelemetryData:
+    speed: int
+    rpm: int
+    gear: int
+    throttle: int
+    brake: int
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -25,6 +72,8 @@ class MainWindow(QMainWindow):
 
         self.current_mode = "Stopped"
         self.packet_count = 0
+        self.valid_telemetry_packets = 0
+        self.parser_errors = 0
         self.udp_port = 20777
         self.udp_listening = False
 
@@ -51,6 +100,14 @@ class MainWindow(QMainWindow):
         self.mode_label.setStyleSheet("font-size: 16px; font-weight: bold;")
 
         self.udp_status_label = QLabel("UDP status: Stopped")
+        self.parser_status_label = QLabel(
+            "Parser status: Waiting for F1 2018 telemetry"
+        )
+        self.detected_format_label = QLabel("Detected format: --")
+        self.packet_type_label = QLabel("Packet type: --")
+        self.player_car_index_label = QLabel("Player car index: --")
+        self.valid_telemetry_packets_label = QLabel("Valid telemetry packets: 0")
+        self.parser_errors_label = QLabel("Parser errors: 0")
         self.packet_count_label = QLabel("Packets received: 0")
         self.latest_packet_size_label = QLabel("Latest packet size: 0 bytes")
         self.packet_preview_label = QLabel("Packet preview: --")
@@ -65,6 +122,12 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(self.create_telemetry_layout())
         main_layout.addLayout(self.create_button_layout())
         main_layout.addWidget(self.udp_status_label)
+        main_layout.addWidget(self.parser_status_label)
+        main_layout.addWidget(self.detected_format_label)
+        main_layout.addWidget(self.packet_type_label)
+        main_layout.addWidget(self.player_car_index_label)
+        main_layout.addWidget(self.valid_telemetry_packets_label)
+        main_layout.addWidget(self.parser_errors_label)
         main_layout.addWidget(self.packet_count_label)
         main_layout.addWidget(self.latest_packet_size_label)
         main_layout.addWidget(self.packet_preview_label)
@@ -141,6 +204,7 @@ class MainWindow(QMainWindow):
             self.stop_demo()
 
         self.error_label.setText("")
+        self.reset_udp_session()
         self.udp_socket.close()
 
         address = QHostAddress(QHostAddress.SpecialAddress.AnyIPv4)
@@ -183,6 +247,7 @@ class MainWindow(QMainWindow):
 
             self.packet_count += 1
             self.update_packet_information(bytes(packet_data))
+            self.process_f1_packet(bytes(packet_data))
 
     def update_packet_information(self, packet_data: bytes) -> None:
         packet_size = len(packet_data)
@@ -196,6 +261,181 @@ class MainWindow(QMainWindow):
             f"Latest packet size: {packet_size} bytes"
         )
         self.packet_preview_label.setText(f"Packet preview: {preview}")
+
+    def process_f1_packet(self, packet: bytes) -> None:
+        header = self.parse_packet_header(packet)
+
+        if header is None:
+            self.add_parser_error("Parser status: Invalid packet")
+            return
+
+        packet_name = self.get_packet_name(header.packet_id)
+        self.detected_format_label.setText(
+            f"Detected format: {header.packet_format}"
+        )
+        self.packet_type_label.setText(f"Packet type: {packet_name}")
+        self.player_car_index_label.setText(
+            f"Player car index: {header.player_car_index}"
+        )
+
+        if header.packet_format != F1_2018_PACKET_FORMAT:
+            self.set_parser_status(
+                f"Parser status: Unsupported packet format: {header.packet_format}"
+            )
+            return
+
+        if header.packet_id != F1_2018_CAR_TELEMETRY_PACKET_ID:
+            # F1 sends several packet types; only packet 6 updates this dashboard.
+            self.set_parser_status("Parser status: F1 2018 detected")
+            return
+
+        telemetry = self.parse_car_telemetry_packet(
+            packet,
+            header.player_car_index,
+        )
+
+        if telemetry is None:
+            self.add_parser_error("Parser status: Invalid car telemetry packet")
+            return
+
+        self.valid_telemetry_packets += 1
+        self.valid_telemetry_packets_label.setText(
+            f"Valid telemetry packets: {self.valid_telemetry_packets}"
+        )
+        self.set_parser_status("Parser status: F1 2018 car telemetry decoded")
+        self.update_real_telemetry(telemetry)
+
+    def parse_packet_header(self, packet: bytes) -> PacketHeader | None:
+        if len(packet) < F1_2018_HEADER_SIZE:
+            return None
+
+        try:
+            # F1 2018 packets are packed and use little-endian byte order.
+            (
+                packet_format,
+                packet_version,
+                packet_id,
+                _session_uid,
+                session_time,
+                frame_identifier,
+                player_car_index,
+            ) = struct.unpack_from(F1_2018_HEADER_FORMAT, packet, 0)
+        except struct.error:
+            return None
+
+        return PacketHeader(
+            packet_format=packet_format,
+            packet_version=packet_version,
+            packet_id=packet_id,
+            session_time=session_time,
+            frame_identifier=frame_identifier,
+            player_car_index=player_car_index,
+        )
+
+    def parse_car_telemetry_packet(
+        self,
+        packet: bytes,
+        player_car_index: int,
+    ) -> TelemetryData | None:
+        if len(packet) != F1_2018_CAR_TELEMETRY_PACKET_SIZE:
+            return None
+
+        if player_car_index < 0 or player_car_index >= F1_2018_NUMBER_OF_CARS:
+            return None
+
+        # Each telemetry packet contains one fixed-size record per car.
+        player_data_start = (
+            F1_2018_HEADER_SIZE
+            + player_car_index * F1_2018_CAR_TELEMETRY_RECORD_SIZE
+        )
+
+        try:
+            speed = struct.unpack_from(
+                "<H",
+                packet,
+                player_data_start + CAR_SPEED_OFFSET,
+            )[0]
+            throttle = struct.unpack_from(
+                "<B",
+                packet,
+                player_data_start + CAR_THROTTLE_OFFSET,
+            )[0]
+            brake = struct.unpack_from(
+                "<B",
+                packet,
+                player_data_start + CAR_BRAKE_OFFSET,
+            )[0]
+            gear = struct.unpack_from(
+                "<b",
+                packet,
+                player_data_start + CAR_GEAR_OFFSET,
+            )[0]
+            rpm = struct.unpack_from(
+                "<H",
+                packet,
+                player_data_start + CAR_RPM_OFFSET,
+            )[0]
+        except struct.error:
+            return None
+
+        if speed > 500 or rpm > 25000 or throttle > 100 or brake > 100:
+            return None
+
+        return TelemetryData(
+            speed=speed,
+            rpm=rpm,
+            gear=gear,
+            throttle=throttle,
+            brake=brake,
+        )
+
+    def update_real_telemetry(self, telemetry: TelemetryData) -> None:
+        self.telemetry_labels["Speed"].setText(f"{telemetry.speed} km/h")
+        self.telemetry_labels["RPM"].setText(f"{telemetry.rpm} rpm")
+        self.telemetry_labels["Gear"].setText(self.format_gear(telemetry.gear))
+        self.telemetry_labels["Throttle"].setText(f"{telemetry.throttle}%")
+        self.telemetry_labels["Brake"].setText(f"{telemetry.brake}%")
+
+    def reset_udp_session(self) -> None:
+        self.packet_count = 0
+        self.valid_telemetry_packets = 0
+        self.parser_errors = 0
+
+        self.packet_count_label.setText("Packets received: 0")
+        self.latest_packet_size_label.setText("Latest packet size: 0 bytes")
+        self.packet_preview_label.setText("Packet preview: --")
+        self.detected_format_label.setText("Detected format: --")
+        self.packet_type_label.setText("Packet type: --")
+        self.player_car_index_label.setText("Player car index: --")
+        self.valid_telemetry_packets_label.setText("Valid telemetry packets: 0")
+        self.parser_errors_label.setText("Parser errors: 0")
+        self.set_parser_status("Parser status: Waiting for F1 2018 telemetry")
+
+    def add_parser_error(self, status: str) -> None:
+        self.parser_errors += 1
+        self.parser_errors_label.setText(f"Parser errors: {self.parser_errors}")
+        self.set_parser_status(status)
+
+    def set_parser_status(self, status: str) -> None:
+        if self.parser_status_label.text() != status:
+            self.parser_status_label.setText(status)
+
+    def get_packet_name(self, packet_id: int) -> str:
+        packet_name = PACKET_NAMES.get(packet_id)
+
+        if packet_name is None:
+            return f"Unknown ({packet_id})"
+
+        return packet_name
+
+    def format_gear(self, gear: int) -> str:
+        if gear == -1:
+            return "R"
+
+        if gear == 0:
+            return "N"
+
+        return str(gear)
 
     def handle_udp_error(self, _socket_error=None) -> None:
         error_message = self.udp_socket.errorString()
