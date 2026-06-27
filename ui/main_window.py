@@ -1,9 +1,11 @@
-import random
+from collections import deque
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QCloseEvent, QIntValidator
 from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -13,7 +15,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from collectors.f1_udp_collector import F1UdpCollector
+from models import TelemetrySample, format_gear
+from telemetry import SOURCE_LABELS, SOURCE_TYPES
+from telemetry.f1_2018 import F12018TelemetrySource
+
+try:
+    import pyqtgraph as pg
+except ImportError:  # pragma: no cover - the app still runs without graphs.
+    pg = None
 
 
 class MainWindow(QMainWindow):
@@ -21,214 +30,339 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Racing Telemetry")
-        self.setMinimumSize(460, 420)
+        self.setMinimumSize(760, 640)
 
+        self.active_source = None
         self.telemetry_labels: dict[str, QLabel] = {}
-        self.packet_count = 0
+        self.common_labels: dict[str, QLabel] = {}
+        self.f1_labels: dict[str, QLabel] = {}
+        self.shared_memory_labels: dict[str, QLabel] = {}
+        self.history_limit = 600
+        self.sample_index = 0
+        self.speed_history = deque(maxlen=self.history_limit)
+        self.rpm_history = deque(maxlen=self.history_limit)
+        self.sample_history = deque(maxlen=self.history_limit)
+        self.speed_curve = None
+        self.rpm_curve = None
 
-        self.demo_timer = QTimer(self)
-        self.demo_timer.setInterval(100)
-        self.demo_timer.timeout.connect(self.update_demo_telemetry)
+        self._build_interface()
+        self._show_stopped_telemetry()
+        self._update_controls()
+        self._source_selection_changed()
 
-        self.udp_collector = F1UdpCollector()
-        self.udp_collector.packet_received.connect(self.handle_udp_packet)
-        self.udp_collector.status_changed.connect(self.handle_udp_status)
-        self.udp_collector.error_occurred.connect(self.show_udp_error)
-
-        self.build_layout()
-        self.show_stopped_telemetry()
-        self.update_mode("Stopped mode")
-
-    def build_layout(self) -> None:
+    def _build_interface(self) -> None:
         central_widget = QWidget()
         main_layout = QVBoxLayout()
 
-        self.mode_label = QLabel()
-        self.mode_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.source_combo = QComboBox()
+        for source_id, label in SOURCE_LABELS.items():
+            self.source_combo.addItem(label, source_id)
 
-        main_layout.addWidget(self.mode_label)
-        main_layout.addLayout(self.create_telemetry_layout())
-        main_layout.addLayout(self.create_demo_buttons())
-        main_layout.addLayout(self.create_udp_layout())
+        self.source_combo.currentIndexChanged.connect(self._source_selection_changed)
+
+        self.port_input = QLineEdit("20777")
+        self.port_input.setValidator(QIntValidator(1, 65535, self))
+
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+        self.start_button.clicked.connect(self.start_selected_source)
+        self.stop_button.clicked.connect(self.stop_active_source)
+
+        source_layout = QGridLayout()
+        source_layout.addWidget(QLabel("Source:"), 0, 0)
+        source_layout.addWidget(self.source_combo, 0, 1)
+        source_layout.addWidget(QLabel("F1 UDP port:"), 1, 0)
+        source_layout.addWidget(self.port_input, 1, 1)
+        source_layout.addWidget(self.start_button, 0, 2)
+        source_layout.addWidget(self.stop_button, 1, 2)
+
+        self.source_label = QLabel("Source: --")
+        self.status_label = QLabel("Status: Stopped")
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet("color: #b00020;")
+
+        main_layout.addLayout(source_layout)
+        main_layout.addWidget(self.source_label)
+        main_layout.addWidget(self.status_label)
+        main_layout.addLayout(self._create_telemetry_layout())
+        main_layout.addWidget(self._create_common_status_group())
+        main_layout.addWidget(self._create_graph_group())
+        main_layout.addWidget(self._create_f1_diagnostics_group())
+        main_layout.addWidget(self._create_shared_memory_group())
+        main_layout.addWidget(self.error_label)
 
         central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
 
-    def create_telemetry_layout(self) -> QGridLayout:
-        telemetry_layout = QGridLayout()
+    def _create_telemetry_layout(self) -> QGridLayout:
+        layout = QGridLayout()
         telemetry_names = ["Speed", "RPM", "Gear", "Throttle", "Brake"]
 
         for row, name in enumerate(telemetry_names):
             name_label = QLabel(f"{name}:")
             value_label = QLabel("--")
-
             name_label.setStyleSheet("font-size: 15px;")
             value_label.setStyleSheet("font-size: 15px; font-weight: bold;")
-
-            telemetry_layout.addWidget(name_label, row, 0)
-            telemetry_layout.addWidget(value_label, row, 1)
-
+            layout.addWidget(name_label, row, 0)
+            layout.addWidget(value_label, row, 1)
             self.telemetry_labels[name] = value_label
 
-        return telemetry_layout
+        return layout
 
-    def create_demo_buttons(self) -> QHBoxLayout:
-        button_layout = QHBoxLayout()
+    def _create_common_status_group(self) -> QGroupBox:
+        group = QGroupBox("Source status")
+        layout = QFormLayout()
+        fields = {
+            "running": "Running:",
+            "latest_update": "Latest update:",
+            "car_name": "Car:",
+            "track_name": "Track:",
+            "session_state": "Session state:",
+        }
 
-        self.start_demo_button = QPushButton("Start Demo")
-        self.stop_demo_button = QPushButton("Stop Demo")
-        self.stop_demo_button.setEnabled(False)
+        for key, caption in fields.items():
+            label = QLabel("--")
+            layout.addRow(caption, label)
+            self.common_labels[key] = label
 
-        self.start_demo_button.clicked.connect(self.start_demo_mode)
-        self.stop_demo_button.clicked.connect(self.stop_demo_mode)
+        group.setLayout(layout)
+        return group
 
-        button_layout.addWidget(self.start_demo_button)
-        button_layout.addWidget(self.stop_demo_button)
+    def _create_graph_group(self) -> QGroupBox:
+        group = QGroupBox("Live graphs")
+        layout = QVBoxLayout()
 
-        return button_layout
+        if pg is None:
+            layout.addWidget(QLabel("pyqtgraph is not available."))
+        else:
+            self.speed_plot = pg.PlotWidget()
+            self.speed_plot.setMinimumHeight(140)
+            self.speed_plot.setLabel("left", "Speed", units="km/h")
+            self.speed_plot.setLabel("bottom", "Samples")
+            self.speed_curve = self.speed_plot.plot(pen=pg.mkPen("#1f77b4", width=2))
 
-    def create_udp_layout(self) -> QGridLayout:
-        udp_layout = QGridLayout()
+            self.rpm_plot = pg.PlotWidget()
+            self.rpm_plot.setMinimumHeight(140)
+            self.rpm_plot.setLabel("left", "RPM")
+            self.rpm_plot.setLabel("bottom", "Samples")
+            self.rpm_curve = self.rpm_plot.plot(pen=pg.mkPen("#d62728", width=2))
 
-        self.port_input = QLineEdit("20777")
-        self.port_input.setValidator(QIntValidator(1, 65535, self))
+            layout.addWidget(self.speed_plot)
+            layout.addWidget(self.rpm_plot)
 
-        self.start_udp_button = QPushButton("Start UDP")
-        self.stop_udp_button = QPushButton("Stop UDP")
-        self.stop_udp_button.setEnabled(False)
+        group.setLayout(layout)
+        return group
 
-        self.udp_status_label = QLabel("UDP status: Stopped")
-        self.packet_count_label = QLabel("Packets received: 0")
-        self.latest_size_label = QLabel("Latest packet size: 0 bytes")
-        self.preview_label = QLabel("Latest packet preview: --")
-        self.error_label = QLabel("")
+    def _create_f1_diagnostics_group(self) -> QGroupBox:
+        self.f1_group = QGroupBox("F1 UDP diagnostics")
+        layout = QFormLayout()
+        fields = {
+            "udp_status": "UDP status:",
+            "parser_status": "Parser status:",
+            "detected_format": "Detected format:",
+            "packet_type": "Packet type:",
+            "player_car_index": "Player car index:",
+            "valid_telemetry_packets": "Valid telemetry packets:",
+            "parser_errors": "Parser errors:",
+            "packets_received": "Packets received:",
+            "latest_packet_size": "Latest packet size:",
+            "packet_preview": "Packet preview:",
+        }
 
-        self.preview_label.setWordWrap(True)
-        self.preview_label.setStyleSheet("font-family: Consolas, monospace;")
-        self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #b00020;")
+        for key, caption in fields.items():
+            label = QLabel("--")
+            if key == "packet_preview":
+                label.setWordWrap(True)
+                label.setStyleSheet("font-family: Consolas, monospace;")
+            layout.addRow(caption, label)
+            self.f1_labels[key] = label
 
-        self.start_udp_button.clicked.connect(self.start_udp_mode)
-        self.stop_udp_button.clicked.connect(self.stop_udp_mode)
+        self.f1_group.setLayout(layout)
+        return self.f1_group
 
-        udp_layout.addWidget(QLabel("UDP port:"), 0, 0)
-        udp_layout.addWidget(self.port_input, 0, 1)
-        udp_layout.addWidget(self.start_udp_button, 1, 0)
-        udp_layout.addWidget(self.stop_udp_button, 1, 1)
-        udp_layout.addWidget(self.udp_status_label, 2, 0, 1, 2)
-        udp_layout.addWidget(self.packet_count_label, 3, 0, 1, 2)
-        udp_layout.addWidget(self.latest_size_label, 4, 0, 1, 2)
-        udp_layout.addWidget(self.preview_label, 5, 0, 1, 2)
-        udp_layout.addWidget(self.error_label, 6, 0, 1, 2)
+    def _create_shared_memory_group(self) -> QGroupBox:
+        self.shared_memory_group = QGroupBox("Shared-memory status")
+        layout = QFormLayout()
+        fields = {
+            "shared_memory": "Shared memory:",
+            "game_state": "Game state:",
+            "last_error": "Last error:",
+        }
 
-        return udp_layout
+        for key, caption in fields.items():
+            label = QLabel("--")
+            label.setWordWrap(True)
+            layout.addRow(caption, label)
+            self.shared_memory_labels[key] = label
 
-    def start_demo_mode(self) -> None:
-        self.stop_udp_mode()
+        self.shared_memory_group.setLayout(layout)
+        return self.shared_memory_group
 
-        self.demo_timer.start()
-        self.update_mode("Demo mode")
-        self.start_demo_button.setEnabled(False)
-        self.stop_demo_button.setEnabled(True)
-
-    def stop_demo_mode(self) -> None:
-        self.demo_timer.stop()
-        self.show_stopped_telemetry()
-
-        self.start_demo_button.setEnabled(True)
-        self.stop_demo_button.setEnabled(False)
-
-        if not self.udp_collector.is_listening:
-            self.update_mode("Stopped mode")
-
-    def start_udp_mode(self) -> None:
-        port = self.get_port_from_input()
-
-        if port is None:
+    def start_selected_source(self) -> None:
+        if self.active_source is not None:
             return
 
-        self.stop_demo_mode()
+        source_id = self.source_combo.currentData()
+        source_class = SOURCE_TYPES[source_id]
+        kwargs = {}
+
+        if source_class is F12018TelemetrySource:
+            port = self._get_udp_port()
+            if port is None:
+                return
+            kwargs["port"] = port
+
+        self._clear_history()
         self.error_label.setText("")
-        self.packet_count = 0
-        self.update_packet_labels(0, b"")
+        self._reset_source_diagnostics()
+        self.active_source = source_class(**kwargs)
+        self.active_source.sample_received.connect(self.handle_telemetry_sample)
+        self.active_source.status_changed.connect(self.handle_source_status)
+        self.active_source.error_occurred.connect(self.handle_source_error)
+        self.active_source.diagnostics_changed.connect(self.handle_diagnostics)
+        self.source_label.setText(f"Source: {SOURCE_LABELS[source_id]}")
+        self.common_labels["running"].setText("Yes")
+        self.active_source.start()
+        self._update_controls()
 
-        self.udp_collector.start(port)
+    def stop_active_source(self) -> None:
+        if self.active_source is None:
+            self._update_controls()
+            return
 
-    def stop_udp_mode(self) -> None:
-        self.udp_collector.stop()
+        source = self.active_source
+        source.stop()
+        source.sample_received.disconnect(self.handle_telemetry_sample)
+        source.status_changed.disconnect(self.handle_source_status)
+        source.error_occurred.disconnect(self.handle_source_error)
+        source.diagnostics_changed.disconnect(self.handle_diagnostics)
+        self.active_source = None
+        self.status_label.setText("Status: Stopped")
+        self.common_labels["running"].setText("No")
+        self._update_controls()
 
-    def get_port_from_input(self) -> int | None:
+    def handle_telemetry_sample(self, sample: TelemetrySample) -> None:
+        self.telemetry_labels["Speed"].setText(f"{sample.speed_kmh:.0f} km/h")
+        self.telemetry_labels["RPM"].setText(f"{sample.rpm} rpm")
+        self.telemetry_labels["Gear"].setText(format_gear(sample.gear))
+        self.telemetry_labels["Throttle"].setText(f"{sample.throttle_percent:.0f}%")
+        self.telemetry_labels["Brake"].setText(f"{sample.brake_percent:.0f}%")
+
+        self.common_labels["latest_update"].setText("Received")
+        self.common_labels["car_name"].setText(sample.car_name or "--")
+        self.common_labels["track_name"].setText(sample.track_name or "--")
+        self.common_labels["session_state"].setText(sample.session_state or "--")
+
+        self.sample_index += 1
+        self.sample_history.append(self.sample_index)
+        self.speed_history.append(sample.speed_kmh)
+        self.rpm_history.append(sample.rpm)
+        self._update_graphs()
+
+    def handle_source_status(self, status: str) -> None:
+        self.status_label.setText(f"Status: {status}")
+
+    def handle_source_error(self, message: str) -> None:
+        self.error_label.setText(message)
+
+    def handle_diagnostics(self, diagnostics: dict) -> None:
+        for key, value in diagnostics.items():
+            text = str(value)
+
+            if key in self.f1_labels:
+                if key == "latest_packet_size" and isinstance(value, int):
+                    text = f"{value} bytes"
+                self.f1_labels[key].setText(text)
+
+            if key in self.shared_memory_labels:
+                self.shared_memory_labels[key].setText(text or "--")
+
+            if key == "car_name":
+                self.common_labels["car_name"].setText(text or "--")
+
+            if key == "track_name":
+                self.common_labels["track_name"].setText(text or "--")
+
+            if key == "game_state":
+                self.common_labels["session_state"].setText(text or "--")
+
+    def _source_selection_changed(self) -> None:
+        if self.active_source is not None:
+            self.stop_active_source()
+
+        source_id = self.source_combo.currentData()
+        self.source_label.setText(f"Source: {SOURCE_LABELS[source_id]}")
+        self._reset_source_diagnostics()
+        self._update_controls()
+
+    def _get_udp_port(self) -> int | None:
         port_text = self.port_input.text().strip()
 
         if not port_text:
-            self.show_udp_error("Please enter a UDP port number.")
+            self.handle_source_error("Please enter a UDP port number.")
             return None
 
         try:
             port = int(port_text)
         except ValueError:
-            self.show_udp_error("UDP port must be a number.")
+            self.handle_source_error("UDP port must be a number.")
             return None
 
         if port < 1 or port > 65535:
-            self.show_udp_error("UDP port must be between 1 and 65535.")
+            self.handle_source_error("UDP port must be between 1 and 65535.")
             return None
 
         return port
 
-    def handle_udp_status(self, status: str) -> None:
-        self.udp_status_label.setText(f"UDP status: {status}")
+    def _reset_source_diagnostics(self) -> None:
+        for label in self.f1_labels.values():
+            label.setText("--")
 
-        if status == "Listening":
-            self.update_mode("UDP listening mode")
-            self.port_input.setEnabled(False)
-            self.start_udp_button.setEnabled(False)
-            self.stop_udp_button.setEnabled(True)
-            return
+        for label in self.shared_memory_labels.values():
+            label.setText("--")
 
-        self.port_input.setEnabled(True)
-        self.start_udp_button.setEnabled(True)
-        self.stop_udp_button.setEnabled(False)
+        self.common_labels["latest_update"].setText("--")
+        self.common_labels["car_name"].setText("--")
+        self.common_labels["track_name"].setText("--")
+        self.common_labels["session_state"].setText("--")
 
-        if not self.demo_timer.isActive():
-            self.update_mode("Stopped mode")
+    def _clear_history(self) -> None:
+        self.sample_index = 0
+        self.sample_history.clear()
+        self.speed_history.clear()
+        self.rpm_history.clear()
+        self._update_graphs()
 
-    def handle_udp_packet(self, packet_data: bytes, packet_size: int) -> None:
-        self.packet_count += 1
-        self.update_packet_labels(packet_size, packet_data)
+    def _update_graphs(self) -> None:
+        if self.speed_curve is not None:
+            self.speed_curve.setData(list(self.sample_history), list(self.speed_history))
 
-    def update_packet_labels(self, packet_size: int, packet_data: bytes) -> None:
-        preview = packet_data[:30].hex(" ")
+        if self.rpm_curve is not None:
+            self.rpm_curve.setData(list(self.sample_history), list(self.rpm_history))
 
-        if not preview:
-            preview = "--"
-
-        self.packet_count_label.setText(f"Packets received: {self.packet_count}")
-        self.latest_size_label.setText(f"Latest packet size: {packet_size} bytes")
-        self.preview_label.setText(f"Latest packet preview: {preview}")
-
-    def show_udp_error(self, message: str) -> None:
-        self.error_label.setText(message)
-
-    def update_mode(self, mode: str) -> None:
-        self.mode_label.setText(f"Mode: {mode}")
-
-    def update_demo_telemetry(self) -> None:
-        speed = random.randint(0, 340)
-        rpm = random.randint(800, 12000)
-        gear = random.choice(["N", "1", "2", "3", "4", "5", "6", "7", "8"])
-        throttle = random.randint(0, 100)
-        brake = random.randint(0, 100)
-
-        self.telemetry_labels["Speed"].setText(f"{speed} km/h")
-        self.telemetry_labels["RPM"].setText(f"{rpm} rpm")
-        self.telemetry_labels["Gear"].setText(gear)
-        self.telemetry_labels["Throttle"].setText(f"{throttle}%")
-        self.telemetry_labels["Brake"].setText(f"{brake}%")
-
-    def show_stopped_telemetry(self) -> None:
+    def _show_stopped_telemetry(self) -> None:
         self.telemetry_labels["Speed"].setText("0 km/h")
         self.telemetry_labels["RPM"].setText("0 rpm")
         self.telemetry_labels["Gear"].setText("N")
         self.telemetry_labels["Throttle"].setText("0%")
         self.telemetry_labels["Brake"].setText("0%")
+        self.common_labels["running"].setText("No")
+
+    def _update_controls(self) -> None:
+        is_running = self.active_source is not None
+        source_id = self.source_combo.currentData()
+        is_f1 = source_id == "f1_2018"
+
+        self.start_button.setEnabled(not is_running)
+        self.stop_button.setEnabled(is_running)
+        self.source_combo.setEnabled(not is_running)
+        self.port_input.setEnabled(is_f1 and not is_running)
+        self.f1_group.setVisible(is_f1)
+        self.shared_memory_group.setVisible(
+            source_id in {"assetto_corsa", "assetto_corsa_competizione"}
+        )
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.stop_active_source()
+        event.accept()
