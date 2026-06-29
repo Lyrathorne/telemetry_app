@@ -1,0 +1,13 @@
+{
+  "source_type": "json",
+  "session_name": "Example JSON Session",
+  "driver_name": "Example Driver",
+  "game": "Demo",
+  "track": "Example Track",
+  "car": "Example Car",
+  "samples": [
+    {"timestamp": 0.0, "session_time": 0.0, "lap_number": 1, "lap_distance": 0.0, "speed_kmh": 0.0, "rpm": 900, "gear": 0, "throttle_percent": 0.0, "brake_percent": 0.0},
+    {"timestamp": 0.05, "session_time": 0.05, "lap_number": 1, "lap_distance": 8.5, "speed_kmh": 44.0, "rpm": 2200, "gear": 1, "throttle_percent": 55.0, "brake_percent": 0.0},
+    {"timestamp": 0.10, "session_time": 0.10, "lap_number": 1, "lap_distance": 19.1, "speed_kmh": 88.0, "rpm": 4400, "gear": 2, "throttle_percent": 81.0, "brake_percent": 0.0}
+  ]
+}
