@@ -1,24 +1,28 @@
 import ctypes
+import sys
 from ctypes import wintypes
 
 
 FILE_MAP_READ = 0x0004
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenFileMappingW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
-kernel32.OpenFileMappingW.restype = wintypes.HANDLE
-kernel32.MapViewOfFile.argtypes = (
-    wintypes.HANDLE,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    ctypes.c_size_t,
-)
-kernel32.MapViewOfFile.restype = wintypes.LPVOID
-kernel32.UnmapViewOfFile.argtypes = (wintypes.LPCVOID,)
-kernel32.UnmapViewOfFile.restype = wintypes.BOOL
-kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32 = None
+
+if sys.platform == "win32":
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenFileMappingW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel32.OpenFileMappingW.restype = wintypes.HANDLE
+    kernel32.MapViewOfFile.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_size_t,
+    )
+    kernel32.MapViewOfFile.restype = wintypes.LPVOID
+    kernel32.UnmapViewOfFile.argtypes = (wintypes.LPCVOID,)
+    kernel32.UnmapViewOfFile.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
 
 
 class NamedSharedMemory:
@@ -29,6 +33,9 @@ class NamedSharedMemory:
         self._address = None
 
     def open(self) -> None:
+        if kernel32 is None:
+            raise OSError("Windows shared memory is only available on Windows")
+
         handle = kernel32.OpenFileMappingW(FILE_MAP_READ, False, self.name)
 
         if not handle:
@@ -57,6 +64,11 @@ class NamedSharedMemory:
         return structure_type.from_buffer_copy(data)
 
     def close(self) -> None:
+        if kernel32 is None:
+            self._address = None
+            self._handle = None
+            return
+
         if self._address is not None:
             kernel32.UnmapViewOfFile(self._address)
             self._address = None
@@ -64,3 +76,15 @@ class NamedSharedMemory:
         if self._handle is not None:
             kernel32.CloseHandle(self._handle)
             self._handle = None
+
+
+def shared_memory_page_available(name: str) -> bool:
+    if kernel32 is None:
+        return False
+
+    handle = kernel32.OpenFileMappingW(FILE_MAP_READ, False, name)
+    if not handle:
+        return False
+
+    kernel32.CloseHandle(handle)
+    return True

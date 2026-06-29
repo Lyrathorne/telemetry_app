@@ -1,6 +1,11 @@
-.venv/
+﻿.venv/
 .venv.venv/
+.localappdata/
 build/
 dist/
+deployment/
 __pycache__/
+.pytest_cache/
 *.pyc
+*.log
+data/*.db

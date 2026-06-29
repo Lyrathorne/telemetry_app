@@ -2,11 +2,11 @@ import struct
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
 from models import TelemetrySample
-from telemetry.base import TelemetrySource
+from telemetry.base import SourceState, TelemetrySource
 
 
 F1_2018_PACKET_FORMAT = 2018
@@ -67,6 +67,10 @@ class F12018TelemetrySource(TelemetrySource):
         self._packet_count = 0
         self._valid_telemetry_packets = 0
         self._parser_errors = 0
+        self._last_packet_time = 0.0
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.setInterval(1000)
+        self._timeout_timer.timeout.connect(self._check_timeout)
 
     def start(self) -> None:
         if self.is_running():
@@ -78,20 +82,22 @@ class F12018TelemetrySource(TelemetrySource):
 
         if not self._socket.bind(address, self.port):
             message = self._socket.errorString()
-            self.status_changed.emit("Error")
-            self.error_occurred.emit(f"Could not listen on UDP port {self.port}: {message}")
-            self._set_running(False)
+            self._set_error(f"Could not listen on UDP port {self.port}: {message}")
+            self._emit_diagnostics({"udp_status": "Error"})
             return
 
         self._set_running(True)
-        self.status_changed.emit(f"Listening on UDP port {self.port}")
+        self._last_packet_time = 0.0
+        self._set_state(SourceState.WAITING_FOR_DATA, f"Listening for UDP on port {self.port}")
+        self._timeout_timer.start()
         self._emit_diagnostics({"udp_status": f"Listening on port {self.port}"})
 
     def stop(self) -> None:
+        self._timeout_timer.stop()
         self._socket.close()
 
         if self.is_running():
-            self.status_changed.emit("Stopped")
+            self._set_state(SourceState.STOPPED, "Stopped")
 
         self._set_running(False)
         self._emit_diagnostics({"udp_status": "Stopped"})
@@ -103,6 +109,7 @@ class F12018TelemetrySource(TelemetrySource):
             self.process_packet(bytes(packet_data))
 
     def process_packet(self, packet: bytes) -> None:
+        self._last_packet_time = time.monotonic()
         self._packet_count += 1
         self._emit_diagnostics(
             {
@@ -141,6 +148,7 @@ class F12018TelemetrySource(TelemetrySource):
             return
 
         self._valid_telemetry_packets += 1
+        self._set_state(SourceState.CONNECTED, "Connected")
         self._emit_diagnostics(
             {
                 "valid_telemetry_packets": self._valid_telemetry_packets,
@@ -180,6 +188,7 @@ class F12018TelemetrySource(TelemetrySource):
                 "valid_telemetry_packets": 0,
                 "parser_errors": 0,
                 "parser_status": "Waiting for F1 2018 telemetry",
+                "updates_per_second": "--",
             }
         )
 
@@ -192,10 +201,23 @@ class F12018TelemetrySource(TelemetrySource):
         if not message:
             return
 
-        self._set_running(False)
-        self.status_changed.emit("Error")
-        self.error_occurred.emit(message)
+        self._timeout_timer.stop()
+        self._set_error(message)
         self._emit_diagnostics({"udp_status": "Error"})
+
+    def _check_timeout(self) -> None:
+        if not self.is_running():
+            return
+
+        if self._last_packet_time == 0.0:
+            self._set_state(SourceState.WAITING_FOR_DATA, f"Listening for UDP on port {self.port}")
+            self._emit_diagnostics({"udp_status": f"Listening on port {self.port}"})
+            return
+
+        elapsed = time.monotonic() - self._last_packet_time
+        if elapsed >= 1.0:
+            self._set_state(SourceState.WAITING_FOR_DATA, "No telemetry received")
+            self._emit_diagnostics({"udp_status": "No telemetry received"})
 
 
 def parse_packet_header(packet: bytes) -> PacketHeader | None:

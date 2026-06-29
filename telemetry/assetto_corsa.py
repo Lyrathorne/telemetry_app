@@ -5,7 +5,7 @@ from ctypes import c_float, c_int32, c_wchar
 from PySide6.QtCore import QObject, QTimer
 
 from models import TelemetrySample
-from telemetry.base import TelemetrySource
+from telemetry.base import SourceState, TelemetrySource
 from telemetry.windows_shared_memory import NamedSharedMemory
 
 
@@ -198,14 +198,15 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
         self._graphics: SPageFileGraphic | None = None
         self._static: SPageFileStatic | None = None
         self._last_packet_id: int | None = None
+        self._last_sample_time = 0.0
 
     def start(self) -> None:
         if self.is_running():
             return
 
         self._set_running(True)
-        self.status_changed.emit("Waiting for Assetto Corsa")
-        self.diagnostics_changed.emit({"shared_memory": "Waiting"})
+        self._set_state(SourceState.WAITING_FOR_DATA, "Waiting for game")
+        self.diagnostics_changed.emit({"shared_memory": "Waiting", "last_error": ""})
         self._try_connect()
 
         if self.is_running() and self._physics is None:
@@ -217,7 +218,7 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
         self._close_maps()
 
         if self.is_running():
-            self.status_changed.emit("Stopped")
+            self._set_state(SourceState.STOPPED, "Stopped")
 
         self._set_running(False)
         self.diagnostics_changed.emit({"shared_memory": "Stopped"})
@@ -241,7 +242,7 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
             self._static_map.open()
         except (FileNotFoundError, OSError, ValueError) as error:
             self._close_maps()
-            self.status_changed.emit("Waiting for Assetto Corsa")
+            self._set_state(SourceState.WAITING_FOR_DATA, "Waiting for game")
             self.diagnostics_changed.emit(
                 {"shared_memory": "Waiting", "last_error": readable_error(error)}
             )
@@ -249,7 +250,7 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
 
         self._retry_timer.stop()
         self._poll_timer.start()
-        self.status_changed.emit("Connected to Assetto Corsa")
+        self._set_state(SourceState.WAITING_FOR_DATA, "Waiting for telemetry")
         self.diagnostics_changed.emit({"shared_memory": "Connected"})
 
     def _poll(self) -> None:
@@ -278,10 +279,18 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
             }
         )
 
-        if status not in (AC_LIVE, AC_PAUSE) or packet_id == self._last_packet_id:
+        if status not in (AC_LIVE, AC_PAUSE):
+            self._set_state(SourceState.WAITING_FOR_DATA, "Waiting for live session")
+            return
+
+        if packet_id == self._last_packet_id:
+            if self._last_sample_time and time.monotonic() - self._last_sample_time >= 1.0:
+                self._set_state(SourceState.WAITING_FOR_DATA, "No telemetry received")
             return
 
         self._last_packet_id = packet_id
+        self._last_sample_time = time.monotonic()
+        self._set_state(SourceState.CONNECTED, "Connected")
         self.sample_received.emit(
             TelemetrySample(
                 speed_kmh=max(0.0, float(self._physics.speedKmh)),
@@ -300,7 +309,7 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
     def _handle_mapping_lost(self, message: str) -> None:
         self._poll_timer.stop()
         self._close_maps()
-        self.status_changed.emit("Waiting for Assetto Corsa")
+        self._set_state(SourceState.WAITING_FOR_DATA, "Waiting for game")
         self.diagnostics_changed.emit({"shared_memory": "Waiting", "last_error": message})
 
         if self.is_running():
@@ -311,6 +320,7 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
         self._graphics = None
         self._static = None
         self._last_packet_id = None
+        self._last_sample_time = 0.0
 
         for mapping_name in ("_physics_map", "_graphics_map", "_static_map"):
             mapping = getattr(self, mapping_name)

@@ -4,7 +4,7 @@ import time
 from PySide6.QtCore import QObject, QTimer
 
 from models import TelemetrySample
-from telemetry.base import TelemetrySource
+from telemetry.base import SourceState, TelemetrySource
 
 
 class DemoTelemetrySource(TelemetrySource):
@@ -24,7 +24,8 @@ class DemoTelemetrySource(TelemetrySource):
 
         self._start_time = time.monotonic()
         self._set_running(True)
-        self.status_changed.emit("Demo telemetry running")
+        self._set_state(SourceState.CONNECTED, "Connected")
+        self.diagnostics_changed.emit({"updates_per_second": "--", "last_error": ""})
         self._timer.start()
 
     def stop(self) -> None:
@@ -32,7 +33,7 @@ class DemoTelemetrySource(TelemetrySource):
             self._timer.stop()
 
         if self.is_running():
-            self.status_changed.emit("Stopped")
+            self._set_state(SourceState.STOPPED, "Stopped")
 
         self._set_running(False)
 

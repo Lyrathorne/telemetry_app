@@ -1,6 +1,9 @@
 from collections import deque
+import logging
+import time
 
 from PySide6.QtGui import QCloseEvent, QIntValidator
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from models import TelemetrySample, format_gear
 from telemetry import SOURCE_LABELS, SOURCE_TYPES
+from telemetry.base import SourceState
 from telemetry.f1_2018 import F12018TelemetrySource
 
 try:
@@ -39,6 +43,13 @@ class MainWindow(QMainWindow):
         self.shared_memory_labels: dict[str, QLabel] = {}
         self.history_limit = 600
         self.sample_index = 0
+        self._last_sample_wall_time = 0.0
+        self._sample_count_window = 0
+        self._rate_window_started = time.monotonic()
+        self._logger = logging.getLogger(__name__)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._refresh_live_diagnostics)
         self.speed_history = deque(maxlen=self.history_limit)
         self.rpm_history = deque(maxlen=self.history_limit)
         self.sample_history = deque(maxlen=self.history_limit)
@@ -115,10 +126,13 @@ class MainWindow(QMainWindow):
         layout = QFormLayout()
         fields = {
             "running": "Running:",
+            "connection_state": "Connection state:",
             "latest_update": "Latest update:",
+            "updates_per_second": "Updates/s:",
             "car_name": "Car:",
             "track_name": "Track:",
             "session_state": "Session state:",
+            "latest_error": "Latest error:",
         }
 
         for key, caption in fields.items():
@@ -222,8 +236,20 @@ class MainWindow(QMainWindow):
         self.active_source.error_occurred.connect(self.handle_source_error)
         self.active_source.diagnostics_changed.connect(self.handle_diagnostics)
         self.source_label.setText(f"Source: {SOURCE_LABELS[source_id]}")
-        self.common_labels["running"].setText("Yes")
+        self.common_labels["running"].setText("Starting")
+        self.common_labels["connection_state"].setText("Starting")
+        self._logger.info("Starting telemetry source: %s", SOURCE_LABELS[source_id])
         self.active_source.start()
+        self._status_timer.start()
+
+        if (
+            self.active_source is not None
+            and self.active_source.state() == SourceState.ERROR
+            and not self.active_source.is_running()
+        ):
+            self._detach_source(self.active_source)
+            self.active_source = None
+
         self._update_controls()
 
     def stop_active_source(self) -> None:
@@ -232,24 +258,28 @@ class MainWindow(QMainWindow):
             return
 
         source = self.active_source
+        self._logger.info("Stopping telemetry source: %s", source.display_name)
         source.stop()
-        source.sample_received.disconnect(self.handle_telemetry_sample)
-        source.status_changed.disconnect(self.handle_source_status)
-        source.error_occurred.disconnect(self.handle_source_error)
-        source.diagnostics_changed.disconnect(self.handle_diagnostics)
+        self._detach_source(source)
         self.active_source = None
+        self._status_timer.stop()
         self.status_label.setText("Status: Stopped")
         self.common_labels["running"].setText("No")
+        self.common_labels["connection_state"].setText("Stopped")
         self._update_controls()
 
     def handle_telemetry_sample(self, sample: TelemetrySample) -> None:
+        self._last_sample_wall_time = time.time()
+        self._sample_count_window += 1
         self.telemetry_labels["Speed"].setText(f"{sample.speed_kmh:.0f} km/h")
         self.telemetry_labels["RPM"].setText(f"{sample.rpm} rpm")
         self.telemetry_labels["Gear"].setText(format_gear(sample.gear))
         self.telemetry_labels["Throttle"].setText(f"{sample.throttle_percent:.0f}%")
         self.telemetry_labels["Brake"].setText(f"{sample.brake_percent:.0f}%")
 
-        self.common_labels["latest_update"].setText("Received")
+        self.common_labels["latest_update"].setText(
+            time.strftime("%H:%M:%S", time.localtime(sample.timestamp or self._last_sample_wall_time))
+        )
         self.common_labels["car_name"].setText(sample.car_name or "--")
         self.common_labels["track_name"].setText(sample.track_name or "--")
         self.common_labels["session_state"].setText(sample.session_state or "--")
@@ -262,9 +292,14 @@ class MainWindow(QMainWindow):
 
     def handle_source_status(self, status: str) -> None:
         self.status_label.setText(f"Status: {status}")
+        self.common_labels["connection_state"].setText(status)
+        self.common_labels["running"].setText("Yes" if self.active_source and self.active_source.is_running() else "No")
+        self._logger.info("Source status: %s", status)
 
     def handle_source_error(self, message: str) -> None:
         self.error_label.setText(message)
+        self.common_labels["latest_error"].setText(message or "--")
+        self._logger.error("Telemetry source error: %s", message)
 
     def handle_diagnostics(self, diagnostics: dict) -> None:
         for key, value in diagnostics.items():
@@ -287,6 +322,12 @@ class MainWindow(QMainWindow):
             if key == "game_state":
                 self.common_labels["session_state"].setText(text or "--")
 
+            if key == "updates_per_second":
+                self.common_labels["updates_per_second"].setText(text or "--")
+
+            if key == "last_error":
+                self.common_labels["latest_error"].setText(text or "--")
+
     def _source_selection_changed(self) -> None:
         if self.active_source is not None:
             self.stop_active_source()
@@ -295,6 +336,11 @@ class MainWindow(QMainWindow):
         self.source_label.setText(f"Source: {SOURCE_LABELS[source_id]}")
         self._reset_source_diagnostics()
         self._update_controls()
+
+    def select_source(self, source_id: str) -> None:
+        index = self.source_combo.findData(source_id)
+        if index >= 0:
+            self.source_combo.setCurrentIndex(index)
 
     def _get_udp_port(self) -> int | None:
         port_text = self.port_input.text().strip()
@@ -323,15 +369,21 @@ class MainWindow(QMainWindow):
             label.setText("--")
 
         self.common_labels["latest_update"].setText("--")
+        self.common_labels["updates_per_second"].setText("--")
         self.common_labels["car_name"].setText("--")
         self.common_labels["track_name"].setText("--")
         self.common_labels["session_state"].setText("--")
+        self.common_labels["connection_state"].setText("Stopped")
+        self.common_labels["latest_error"].setText("--")
 
     def _clear_history(self) -> None:
         self.sample_index = 0
         self.sample_history.clear()
         self.speed_history.clear()
         self.rpm_history.clear()
+        self._last_sample_wall_time = 0.0
+        self._sample_count_window = 0
+        self._rate_window_started = time.monotonic()
         self._update_graphs()
 
     def _update_graphs(self) -> None:
@@ -348,6 +400,9 @@ class MainWindow(QMainWindow):
         self.telemetry_labels["Throttle"].setText("0%")
         self.telemetry_labels["Brake"].setText("0%")
         self.common_labels["running"].setText("No")
+        self.common_labels["connection_state"].setText("Stopped")
+        self.common_labels["updates_per_second"].setText("--")
+        self.common_labels["latest_error"].setText("--")
 
     def _update_controls(self) -> None:
         is_running = self.active_source is not None
@@ -366,3 +421,31 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop_active_source()
         event.accept()
+
+    def _detach_source(self, source) -> None:
+        for signal, handler in (
+            (source.sample_received, self.handle_telemetry_sample),
+            (source.status_changed, self.handle_source_status),
+            (source.error_occurred, self.handle_source_error),
+            (source.diagnostics_changed, self.handle_diagnostics),
+        ):
+            try:
+                signal.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _refresh_live_diagnostics(self) -> None:
+        if self.active_source is None:
+            return
+
+        now = time.monotonic()
+        elapsed = max(0.001, now - self._rate_window_started)
+        updates_per_second = self._sample_count_window / elapsed
+        self.common_labels["updates_per_second"].setText(f"{updates_per_second:.1f}")
+        self._sample_count_window = 0
+        self._rate_window_started = now
+
+        if self._last_sample_wall_time and time.time() - self._last_sample_wall_time >= 1.0:
+            state = self.active_source.state()
+            if state == SourceState.CONNECTED:
+                self.common_labels["connection_state"].setText("No telemetry received")
