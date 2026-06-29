@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from PySide6.QtCore import QSettings
 
@@ -49,7 +50,7 @@ class AppSettings:
         self._settings.setValue("paths/export_directory", path)
 
     def graph_refresh_ms(self) -> int:
-        return self._int_value("graphs/refresh_ms", 100, 33, 2000)
+        return self._int_value("graphs/refresh_ms", 50, 33, 2000)
 
     def set_graph_refresh_ms(self, value: int) -> None:
         self._settings.setValue("graphs/refresh_ms", max(33, min(2000, int(value))))
@@ -89,6 +90,19 @@ class AppSettings:
 
     def load_state(self):
         return self._settings.value("window/state")
+
+    def graph_panels_state(self) -> list[dict]:
+        raw = self._settings.value("graphs/panels", "[]", str)
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def set_graph_panels_state(self, panels: list[dict]) -> None:
+        self._settings.setValue("graphs/panels", json.dumps(panels))
 
     def save_was_maximized(self, maximized: bool) -> None:
         self._settings.setValue("window/was_maximized", maximized)

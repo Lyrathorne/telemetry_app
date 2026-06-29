@@ -118,6 +118,35 @@ The `Layouts` menu includes:
 
 `Reset layout` restores a sensible default arrangement.
 
+## Live Graphs
+
+Live graph panels use PyQtGraph and refresh independently from telemetry collection. Incoming telemetry samples are appended to the panel's raw in-memory session buffer, while a UI timer redraws the visible graph at a stable refresh interval. This coalesces high-frequency telemetry into one render frame and avoids a growing redraw backlog.
+
+Each graph panel supports:
+
+- adding and removing metrics
+- hiding/showing displayed metrics with checkboxes
+- clearing only the visual view
+- starting a new graph session
+- pausing and resuming rendering without losing samples
+- returning to live/follow mode
+- legend visibility
+- X-axis modes: Full session, Follow live, Recent window, Manual range
+- Y-axis modes: Automatic range, Metric default range, Manual range
+- manual X/Y range validation and reset
+
+Default metric ranges:
+
+- speed: `0-300 km/h`
+- RPM: `0-12000 rpm`
+- throttle: `0-100%`
+- brake: `0-100%`
+- clutch: `0-100%`
+- gear: `-1-8`
+- steering: `-100-100`
+
+To keep mixed units readable, a graph panel accepts one unit group at a time. For example, use one panel for speed, another for RPM, and another for throttle/brake/clutch. Full raw history is retained for the graph session; long visible ranges are downsampled for rendering instead of deleting old telemetry.
+
 ## Importing Telemetry
 
 Use `File > Import telemetry...` or the `Import` button in the `Imported Sessions` panel.

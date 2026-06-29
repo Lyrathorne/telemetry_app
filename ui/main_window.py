@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
         self.add_graph_panel("Live Graphs")
+        self._restore_graph_panel_settings()
 
         for dock in self.docks.values():
             self.view_menu.addAction(dock.toggleViewAction())
@@ -437,6 +438,15 @@ class MainWindow(QMainWindow):
         dock.visibilityChanged.connect(self._update_actions)
         if hasattr(self, "view_menu"):
             self.view_menu.addAction(dock.toggleViewAction())
+
+    def _restore_graph_panel_settings(self) -> None:
+        states = self.settings.graph_panels_state()
+        if not states:
+            return
+        while len(self.graph_panels) < len(states):
+            self.add_graph_panel()
+        for panel, state in zip(self.graph_panels, states):
+            panel.restore_settings_state(state)
 
     def start_selected_source(self) -> None:
         if self.active_source is not None:
@@ -948,6 +958,7 @@ class MainWindow(QMainWindow):
         self.stop_active_source()
         self.settings.save_geometry(self.saveGeometry())
         self.settings.save_state(self.saveState())
+        self.settings.set_graph_panels_state([panel.settings_state() for panel in self.graph_panels])
         self.settings.save_was_maximized(self.isMaximized())
         self.settings.sync()
         self.session_store.save(self.sessions)
