@@ -501,10 +501,14 @@ class MainWindow(QMainWindow):
             "game_state": "Game state:",
             "last_error": "Last error:",
             "acc_sector_index": "Raw ACC sector:",
+            "acc_raw_current_lap_time_ms": "Raw current lap:",
             "acc_current_lap_time_ms": "ACC current lap:",
+            "acc_raw_last_lap_time_ms": "Raw last lap:",
+            "acc_last_lap_time_ms": "ACC last lap:",
             "acc_split_ms": "ACC split:",
             "acc_last_sector_time_ms": "ACC last sector:",
             "acc_completed_laps": "ACC completed laps:",
+            "acc_normalized_position": "ACC normalized position:",
             "acc_in_pit": "ACC pit:",
         }.items():
             label = QLabel("--")

@@ -5,6 +5,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 datas = collect_data_files("PySide6", include_py_files=False)
+datas += [("resources", "resources")]
 binaries = collect_dynamic_libs("PySide6")
 
 a = Analysis(

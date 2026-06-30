@@ -6,11 +6,15 @@ from telemetry import SOURCE_TYPES
 from telemetry.assetto_corsa import normalize_ac_gear, to_percent as ac_to_percent
 from telemetry.assetto_corsa_competizione import normalize_acc_gear
 from telemetry.assetto_corsa_competizione import (
+    GRAPHICS_BEST_TIME_TEXT_OFFSET,
     GRAPHICS_COMPLETED_LAPS_OFFSET,
+    GRAPHICS_CURRENT_TIME_TEXT_OFFSET,
     GRAPHICS_CURRENT_SECTOR_OFFSET,
     GRAPHICS_CURRENT_TIME_OFFSET,
     GRAPHICS_LAST_SECTOR_TIME_OFFSET,
+    GRAPHICS_LAST_TIME_TEXT_OFFSET,
     GRAPHICS_LAST_TIME_OFFSET,
+    GRAPHICS_NORMALIZED_POSITION_OFFSET,
     GRAPHICS_SPLIT_TEXT_OFFSET,
     GRAPHICS_HEADER_FORMAT,
     parse_acc_time_text,
@@ -106,20 +110,26 @@ class TelemetryTests(unittest.TestCase):
         packet = bytearray(256)
         struct.pack_into(GRAPHICS_HEADER_FORMAT, packet, 0, 9, 2, 0)
         write_utf16(packet, GRAPHICS_SPLIT_TEXT_OFFSET, "01:14.135", 15)
+        write_utf16(packet, GRAPHICS_CURRENT_TIME_TEXT_OFFSET, "01:14.135", 15)
+        write_utf16(packet, GRAPHICS_LAST_TIME_TEXT_OFFSET, "01:46.942", 15)
+        write_utf16(packet, GRAPHICS_BEST_TIME_TEXT_OFFSET, "01:45.000", 15)
         struct.pack_into("=i", packet, GRAPHICS_COMPLETED_LAPS_OFFSET, 4)
-        struct.pack_into("=i", packet, GRAPHICS_CURRENT_TIME_OFFSET, 74135)
-        struct.pack_into("=i", packet, GRAPHICS_LAST_TIME_OFFSET, 106942)
+        struct.pack_into("=i", packet, GRAPHICS_CURRENT_TIME_OFFSET, -1)
+        struct.pack_into("=i", packet, GRAPHICS_LAST_TIME_OFFSET, -1)
         struct.pack_into("=i", packet, GRAPHICS_CURRENT_SECTOR_OFFSET, 2)
         struct.pack_into("=i", packet, GRAPHICS_LAST_SECTOR_TIME_OFFSET, 42851)
+        struct.pack_into("=f", packet, GRAPHICS_NORMALIZED_POSITION_OFFSET, 0.75)
 
         graphics = read_acc_graphics(BytesMapping(packet))
 
         self.assertEqual(graphics["completed_laps"], 4)
         self.assertEqual(graphics["current_lap_time_ms"], 74135)
         self.assertEqual(graphics["last_lap_time_ms"], 106942)
+        self.assertEqual(graphics["best_lap_time_ms"], 105000)
         self.assertEqual(graphics["current_sector_index"], 2)
         self.assertEqual(graphics["current_split_time_ms"], 74135)
         self.assertEqual(graphics["last_sector_time_ms"], 42851)
+        self.assertEqual(graphics["normalized_track_position"], 0.75)
 
     def test_acc_time_text_parser(self) -> None:
         self.assertEqual(parse_acc_time_text("31.284"), 31284)

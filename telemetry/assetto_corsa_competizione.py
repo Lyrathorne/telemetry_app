@@ -37,6 +37,9 @@ PHYSICS_HEADER_SIZE = struct.calcsize(PHYSICS_FORMAT)
 SPEED_KMH_OFFSET = PHYSICS_HEADER_SIZE + 4
 
 GRAPHICS_HEADER_FORMAT = "=iii"
+GRAPHICS_CURRENT_TIME_TEXT_OFFSET = 12
+GRAPHICS_LAST_TIME_TEXT_OFFSET = 42
+GRAPHICS_BEST_TIME_TEXT_OFFSET = 72
 GRAPHICS_SPLIT_TEXT_OFFSET = 102
 GRAPHICS_COMPLETED_LAPS_OFFSET = 132
 GRAPHICS_POSITION_OFFSET = 136
@@ -48,6 +51,10 @@ GRAPHICS_DISTANCE_TRAVELED_OFFSET = 156
 GRAPHICS_IS_IN_PIT_OFFSET = 160
 GRAPHICS_CURRENT_SECTOR_OFFSET = 164
 GRAPHICS_LAST_SECTOR_TIME_OFFSET = 168
+GRAPHICS_NUMBER_OF_LAPS_OFFSET = 172
+GRAPHICS_TYRE_COMPOUND_OFFSET = 176
+GRAPHICS_REPLAY_TIME_MULTIPLIER_OFFSET = 244
+GRAPHICS_NORMALIZED_POSITION_OFFSET = 248
 
 
 class AccTelemetrySource(TelemetrySource):
@@ -139,10 +146,14 @@ class AccTelemetrySource(TelemetrySource):
                 "car_name": statics["car_name"],
                 "track_name": statics["track_name"],
                 "acc_sector_index": graphics.get("current_sector_index"),
+                "acc_raw_current_lap_time_ms": graphics.get("raw_current_lap_time_ms"),
                 "acc_current_lap_time_ms": graphics.get("current_lap_time_ms"),
+                "acc_raw_last_lap_time_ms": graphics.get("raw_last_lap_time_ms"),
+                "acc_last_lap_time_ms": graphics.get("last_lap_time_ms"),
                 "acc_split_ms": graphics.get("current_split_time_ms"),
                 "acc_last_sector_time_ms": graphics.get("last_sector_time_ms"),
                 "acc_completed_laps": graphics.get("completed_laps"),
+                "acc_normalized_position": graphics.get("normalized_track_position"),
                 "acc_in_pit": graphics.get("is_in_pit"),
             }
         )
@@ -180,6 +191,7 @@ class AccTelemetrySource(TelemetrySource):
                 current_split_time_ms=graphics.get("current_split_time_ms"),
                 last_sector_time_ms=graphics.get("last_sector_time_ms"),
                 lap_distance=graphics.get("distance_traveled_m"),
+                normalized_track_position=graphics.get("normalized_track_position"),
                 in_pit=graphics.get("is_in_pit"),
             )
         )
@@ -256,27 +268,35 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
         mapping.read_bytes(0, struct.calcsize(GRAPHICS_HEADER_FORMAT)),
     )
     completed_laps = read_int32(mapping, GRAPHICS_COMPLETED_LAPS_OFFSET)
-    current_lap_time_ms = read_int32(mapping, GRAPHICS_CURRENT_TIME_OFFSET)
-    last_lap_time_ms = read_int32(mapping, GRAPHICS_LAST_TIME_OFFSET)
-    best_lap_time_ms = read_int32(mapping, GRAPHICS_BEST_TIME_OFFSET)
+    current_lap_time_raw = read_int32(mapping, GRAPHICS_CURRENT_TIME_OFFSET)
+    last_lap_time_raw = read_int32(mapping, GRAPHICS_LAST_TIME_OFFSET)
+    best_lap_time_raw = read_int32(mapping, GRAPHICS_BEST_TIME_OFFSET)
+    current_lap_time_text_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_CURRENT_TIME_TEXT_OFFSET, 15))
+    last_lap_time_text_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_LAST_TIME_TEXT_OFFSET, 15))
+    best_lap_time_text_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_BEST_TIME_TEXT_OFFSET, 15))
     current_split_time_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_SPLIT_TEXT_OFFSET, 15))
     distance_traveled_m = read_float32(mapping, GRAPHICS_DISTANCE_TRAVELED_OFFSET)
     is_in_pit = bool(read_int32(mapping, GRAPHICS_IS_IN_PIT_OFFSET))
     current_sector_index = read_int32(mapping, GRAPHICS_CURRENT_SECTOR_OFFSET)
     last_sector_time_ms = read_int32(mapping, GRAPHICS_LAST_SECTOR_TIME_OFFSET)
+    normalized_position = read_float32(mapping, GRAPHICS_NORMALIZED_POSITION_OFFSET)
     return {
         "packet_id": int(packet_id),
         "status": int(status),
         "session_type": int(session_type),
         "completed_laps": max(0, int(completed_laps)),
-        "current_lap_time_ms": positive_time_or_none(current_lap_time_ms),
-        "last_lap_time_ms": positive_time_or_none(last_lap_time_ms),
-        "best_lap_time_ms": positive_time_or_none(best_lap_time_ms),
+        "raw_current_lap_time_ms": current_lap_time_raw,
+        "raw_last_lap_time_ms": last_lap_time_raw,
+        "raw_best_lap_time_ms": best_lap_time_raw,
+        "current_lap_time_ms": first_time_or_none(current_lap_time_text_ms, current_lap_time_raw),
+        "last_lap_time_ms": first_time_or_none(last_lap_time_text_ms, last_lap_time_raw),
+        "best_lap_time_ms": first_time_or_none(best_lap_time_text_ms, best_lap_time_raw),
         "current_split_time_ms": positive_time_or_none(current_split_time_ms),
         "last_sector_time_ms": positive_time_or_none(last_sector_time_ms),
         "distance_traveled_m": max(0.0, float(distance_traveled_m)),
+        "normalized_track_position": normalized_position if 0.0 <= normalized_position <= 1.0 else None,
         "is_in_pit": is_in_pit,
-        "current_sector_index": current_sector_index if 0 <= current_sector_index <= 5 else None,
+        "current_sector_index": current_sector_index if 0 <= current_sector_index <= 2 else None,
     }
 
 
@@ -314,6 +334,13 @@ def read_float32(mapping: NamedSharedMemory, offset: int) -> float:
 
 def positive_time_or_none(value: int) -> int | None:
     return int(value) if value > 0 else None
+
+
+def first_time_or_none(*values: int | None) -> int | None:
+    for value in values:
+        if value is not None and int(value) > 0:
+            return int(value)
+    return None
 
 
 def parse_acc_time_text(value: str) -> int | None:

@@ -91,6 +91,28 @@ class GraphPanelTests(unittest.TestCase):
         self.assertEqual(panel.raw_sample_count(), 1000)
         self.assertLess(panel.visible_sample_count(), 1000)
 
+    def test_follow_live_renders_visible_absolute_window_only(self) -> None:
+        panel = GraphPanel("Test", 50, 100)
+        for index in range(1000):
+            panel.add_sample(sample(index))
+        original_x = panel._sample_x(panel.samples[500])
+        panel.x_mode_combo.setCurrentIndex(panel.x_mode_combo.findData("follow_live"))
+        panel.recent_window_seconds.setValue(1)
+        visible_x, visible_indices = panel._visible_x_values()
+        self.assertLess(len(visible_indices), panel.raw_sample_count())
+        self.assertAlmostEqual(panel._sample_x(panel.samples[500]), original_x)
+        self.assertGreaterEqual(float(visible_x[0]), panel.latest_sample_x - 1.0)
+
+    def test_constant_pedal_y_range_is_stable(self) -> None:
+        panel = GraphPanel("Test", 50, 100)
+        panel.clear_metrics()
+        panel.add_metric("throttle_percent")
+        panel.add_metric("brake_percent")
+        for index in range(500):
+            panel.add_sample(TelemetrySample(timestamp=index / 60.0, throttle_percent=50.0, brake_percent=20.0))
+        self.assertEqual(panel.y_mode_combo.currentData(), "metric_default")
+        self.assertEqual(combined_metric_default_range(panel.selected_metrics()), (0.0, 100.0))
+
     def test_manual_range_validation(self) -> None:
         panel = GraphPanel("Test", 50, 100)
         panel.x_min.setValue(10.0)

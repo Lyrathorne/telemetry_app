@@ -301,7 +301,7 @@ class GraphPanel(QWidget):
                 name=METRICS.get(metric, metric),
             )
             curve.setClipToView(True)
-            curve.setDownsampling(auto=True, method="peak")
+            curve.setDownsampling(auto=False, method="peak")
             self.curves[metric] = curve
         item = QListWidgetItem(METRICS.get(metric, metric))
         item.setData(Qt.ItemDataRole.UserRole, metric)
@@ -432,7 +432,7 @@ class GraphPanel(QWidget):
         all_x = np.array([self._sample_x(sample) for sample in self.samples], dtype=float)
         indices = np.arange(all_x.size)
         mode = self.x_mode_combo.currentData()
-        if mode == "recent_window":
+        if mode in {"follow_live", "recent_window"}:
             latest = float(all_x[-1])
             minimum = max(0.0, latest - float(self.recent_window_seconds.value()))
             mask = all_x >= minimum
