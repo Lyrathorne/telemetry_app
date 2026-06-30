@@ -159,10 +159,64 @@ class PanelAndLapTests(unittest.TestCase):
 
             self.assertIsNotNone(completed)
             self.assertEqual([sector.time_ms for sector in completed.sectors], [31284, 42851, 32807])
-            self.assertEqual([sector.timing_source for sector in completed.sectors], ["acc_split_derived", "acc_split_derived", "acc_direct"])
+            self.assertEqual([sector.timing_source for sector in completed.sectors], ["acc_cumulative_split"] * 3)
             loaded = storage.load_laps()
             self.assertEqual([sector.time_ms for sector in loaded[0].sectors], [31284, 42851, 32807])
-            self.assertEqual(loaded[0].sectors[2].timing_source, "acc_direct")
+            self.assertEqual(loaded[0].sectors[2].timing_source, "acc_cumulative_split")
+
+    def test_observed_cumulative_splits_are_converted_to_individual_sector_durations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "nurburgring_24h", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(59.617, 59617, 0.32, 0, 1, split_ms=59617, last_sector_ms=59617))
+            tracker.process_sample(lap_sample(105.730, 105730, 0.67, 0, 2, split_ms=105730, last_sector_ms=105730))
+            finish = lap_sample(130.405, 100, 0.01, 1, 0, last_sector_ms=130405)
+            finish.last_lap_time_ms = 130405
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            sector_times = [sector.time_ms for sector in completed.sectors[:3]]
+            self.assertEqual(sector_times, [59617, 46113, 24675])
+            self.assertNotEqual(sector_times[1], 105730)
+            self.assertEqual(sum(sector_times), completed.lap_time_ms)
+            self.assertEqual([sector.timing_source for sector in completed.sectors[:3]], ["acc_cumulative_split"] * 3)
+
+    def test_second_observed_cumulative_split_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "nurburgring_24h", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(67.420, 67420, 0.32, 0, 1, split_ms=67420))
+            tracker.process_sample(lap_sample(115.162, 115162, 0.67, 0, 2, split_ms=115162))
+            finish = lap_sample(146.020, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 146020
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            sector_times = [sector.time_ms for sector in completed.sectors[:3]]
+            self.assertEqual(sector_times, [67420, 47742, 30858])
+            self.assertEqual(sum(sector_times), 146020)
+
+    def test_invalid_cumulative_sector_order_keeps_lap_but_rejects_sectors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(59.0, 59000, 0.3, 0, 1, split_ms=59000))
+            tracker.process_sample(lap_sample(58.0, 58000, 0.6, 0, 2, split_ms=58000))
+            finish = lap_sample(120.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 120000
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            self.assertEqual(completed.lap_time_ms, 120000)
+            self.assertEqual(len(tracker.completed_laps), 1)
+            self.assertTrue(any(sector.time_ms is None for sector in completed.sectors))
+            self.assertIn("Sector timing inconsistent", completed.notes)
 
     def test_duplicate_sector_transition_does_not_duplicate_sector(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,6 +272,26 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual(tracker.repository.get_session_laps(tracker.session_id), [completed])
             self.assertEqual(tracker.storage_status.completed_laps_in_memory, 1)
             self.assertEqual(tracker.storage_status.last_save_result, "Lap saved successfully")
+
+    def test_automatic_lap_summary_persists_with_raw_recording_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(30.0, 30000, 0.3, 0, 1, split_ms=30000))
+            tracker.process_sample(lap_sample(70.0, 70000, 0.7, 0, 2, split_ms=70000))
+            finish = lap_sample(100.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 100000
+
+            completed = tracker.process_sample(finish)
+            loaded = storage.load_laps()
+
+            self.assertIsNotNone(completed)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].lap_time_ms, 100000)
+            self.assertFalse(loaded[0].raw_samples_recorded)
+            self.assertEqual(loaded[0].samples, [])
 
     def test_pit_sample_does_not_create_completed_lap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

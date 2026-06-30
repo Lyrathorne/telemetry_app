@@ -1,7 +1,7 @@
 import struct
 import unittest
 
-from models import format_gear
+from models import format_gear, format_time_ms
 from telemetry import SOURCE_TYPES
 from telemetry.assetto_corsa import normalize_ac_gear, to_percent as ac_to_percent
 from telemetry.assetto_corsa_competizione import normalize_acc_gear
@@ -163,7 +163,16 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(parse_acc_time_text("31.284"), 31284)
         self.assertEqual(parse_acc_time_text("01:31.532"), 91532)
         self.assertEqual(parse_acc_time_text("1:02:03.004"), 3723004)
+        self.assertEqual(parse_acc_time_text("2:10.405"), 130405)
+        self.assertEqual(parse_acc_time_text("2:10:405"), 130405)
         self.assertIsNone(parse_acc_time_text("--"))
+
+    def test_time_formatter_keeps_milliseconds_as_milliseconds(self) -> None:
+        self.assertEqual(format_time_ms(59617), "00:59.617")
+        self.assertEqual(format_time_ms(105730), "01:45.730")
+        self.assertEqual(format_time_ms(130405), "02:10.405")
+        self.assertEqual(format_time_ms(146020), "02:26.020")
+        self.assertEqual(format_time_ms(3723004), "1:02:03.004")
 
 
 class BytesMapping:

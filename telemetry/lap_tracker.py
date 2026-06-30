@@ -14,6 +14,7 @@ from telemetry.lap_storage import LapStorage
 
 
 MIN_REASONABLE_LAP_MS = 10_000
+SECTOR_SUM_TOLERANCE_MS = 250
 
 
 class TimingState(str, Enum):
@@ -109,6 +110,7 @@ class LapTracker(QObject):
         self._last_current_lap_time_ms: int | None = None
         self._last_last_lap_time_ms: int | None = None
         self._completed_sector_total_ms = 0
+        self._cumulative_splits_ms: dict[int, int] = {}
         self._partial_start_sector_index: int | None = None
         self._completed_lap_keys: set[tuple[str, int | str]] = set()
         self._metadata_updated = False
@@ -125,6 +127,7 @@ class LapTracker(QObject):
         self._last_current_lap_time_ms = None
         self._last_last_lap_time_ms = None
         self._completed_sector_total_ms = 0
+        self._cumulative_splits_ms = {}
         self._partial_start_sector_index = None
         self._completed_lap_keys.clear()
         self._metadata_updated = False
@@ -230,12 +233,15 @@ class LapTracker(QObject):
             track=sample.track_name or None,
             car=sample.car_name or None,
             session_id=self.session_id,
+            fully_observed=not partial_first,
+            raw_samples_recorded=False,
             started_at=datetime.now().isoformat(timespec="milliseconds"),
             notes="Started mid-lap" if partial_first else "",
         )
         self._last_sector_index = sample.current_sector_index
         self._last_sector_start_ms = sample.current_lap_time_ms
         self._completed_sector_total_ms = 0
+        self._cumulative_splits_ms = {}
         self._partial_start_sector_index = sample.current_sector_index if partial_first else None
         self.last_event = "Partial lap started" if partial_first else "Lap started"
         self._set_timing_state(
@@ -303,6 +309,7 @@ class LapTracker(QObject):
         lap.complete = True
         lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
         self._finalize_open_sector(lap, sample)
+        self._validate_completed_sector_timing(lap)
         self._apply_timing_colors(lap)
         self.repository.add_completed_lap(lap)
         self.last_event = f"Lap completed: lap={lap.lap_number} time_ms={lap.lap_time_ms}"
@@ -315,6 +322,7 @@ class LapTracker(QObject):
             return
         self.active_lap.complete = False
         self.active_lap.valid = False
+        self.active_lap.fully_observed = False
         self.active_lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
         self.active_lap.notes = append_note(self.active_lap.notes, "First finish after connection; not saved as complete")
         self.last_event = "Partial lap discarded at first confirmed finish"
@@ -354,6 +362,8 @@ class LapTracker(QObject):
         sector_time, source = self._sector_time_from_sample(sector_index, sample, lap_time_ms)
         if sector_time is not None:
             self._completed_sector_total_ms += sector_time
+        if source == "acc_cumulative_split" and sample.current_split_time_ms is not None and sector_index in (0, 1):
+            self._cumulative_splits_ms[sector_index + 1] = int(sample.current_split_time_ms)
         target_lap.sectors.append(
             SectorResult(
                 sector_number=sector_number,
@@ -371,21 +381,61 @@ class LapTracker(QObject):
         sample: TelemetrySample,
         lap_time_ms: int | None = None,
     ) -> tuple[int | None, str]:
-        if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
-            return sample.last_sector_time_ms, "acc_direct"
         if self._partial_start_sector_index == sector_index:
             return None, "partial_lap_unavailable"
-        if sample.current_split_time_ms is not None and sample.current_split_time_ms >= self._completed_sector_total_ms:
-            return sample.current_split_time_ms - self._completed_sector_total_ms, "acc_split_derived"
+        if sector_index in (0, 1):
+            cumulative_split_ms = sample.current_split_time_ms
+            if cumulative_split_ms is not None:
+                previous_cumulative_ms = self._cumulative_splits_ms.get(sector_index, 0)
+                if cumulative_split_ms > previous_cumulative_ms:
+                    return cumulative_split_ms - previous_cumulative_ms, "acc_cumulative_split"
         if sector_index == 2:
             final_lap_time = sample.last_lap_time_ms or lap_time_ms
-            if final_lap_time is not None and final_lap_time >= self._completed_sector_total_ms:
-                return final_lap_time - self._completed_sector_total_ms, "acc_lap_derived"
+            cumulative_split_2_ms = self._cumulative_splits_ms.get(2)
+            if final_lap_time is not None and cumulative_split_2_ms is not None and final_lap_time > cumulative_split_2_ms:
+                return final_lap_time - cumulative_split_2_ms, "acc_cumulative_split"
+            if final_lap_time is not None and final_lap_time > self._completed_sector_total_ms:
+                return final_lap_time - self._completed_sector_total_ms, "sector_transition_derived"
+        if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
+            if lap_time_ms is None or self._completed_sector_total_ms + sample.last_sector_time_ms <= lap_time_ms + SECTOR_SUM_TOLERANCE_MS:
+                return sample.last_sector_time_ms, "acc_direct_sector"
         start_ms = self._last_sector_start_ms
         current_ms = sample.current_lap_time_ms
         if start_ms is not None and current_ms is not None and current_ms >= start_ms:
-            return current_ms - start_ms, "sample_derived"
+            return current_ms - start_ms, "sector_transition_derived"
         return None, "unavailable"
+
+    def _validate_completed_sector_timing(self, lap: LapResult) -> None:
+        if lap.lap_time_ms is None:
+            return
+        sectors = sorted(lap.sectors, key=lambda sector: sector.sector_number)
+        if len(sectors) < 3:
+            return
+        first_three = sectors[:3]
+        sector_times = [sector.time_ms for sector in first_three]
+        if any(time_ms is None or time_ms <= 0 for time_ms in sector_times):
+            lap.notes = append_note(lap.notes, "Sector timing inconsistent; sector values unavailable")
+            for sector in first_three:
+                if sector.time_ms is None or sector.time_ms <= 0:
+                    sector.valid = False
+                    sector.timing_source = "unavailable"
+            return
+        sector_sum_ms = sum(int(time_ms) for time_ms in sector_times if time_ms is not None)
+        if abs(sector_sum_ms - lap.lap_time_ms) <= SECTOR_SUM_TOLERANCE_MS:
+            return
+        self._logger.warning(
+            "Rejecting inconsistent sector timing: lap_id=%s lap_time_ms=%s sectors=%s sum=%s",
+            lap.id,
+            lap.lap_time_ms,
+            sector_times,
+            sector_sum_ms,
+        )
+        lap.notes = append_note(lap.notes, "Sector timing inconsistent; sector values unavailable")
+        for sector in first_three:
+            sector.time_ms = None
+            sector.valid = False
+            sector.comparison_status = "neutral"
+            sector.timing_source = "unavailable"
 
     def _apply_timing_colors(self, lap: LapResult) -> None:
         if not lap.valid or lap.lap_time_ms is None:
@@ -422,7 +472,7 @@ class LapTracker(QObject):
                 len(lap.sectors),
                 len(lap.samples),
             )
-            self.storage.save_lap(lap)
+            self.storage.save_lap(lap, include_samples=lap.raw_samples_recorded)
             self.storage_status.database_available = True
             self.storage_status.last_save_timestamp = time()
             self.storage_status.last_save_result = "Lap saved successfully"
@@ -485,6 +535,7 @@ class LapTracker(QObject):
         self._last_sector_index = None
         self._last_sector_start_ms = None
         self._completed_sector_total_ms = 0
+        self._cumulative_splits_ms = {}
         self._partial_start_sector_index = None
         self.last_event = reason
         self._set_timing_state(TimingState.WAITING_FOR_SESSION, f"Waiting: {reason}")

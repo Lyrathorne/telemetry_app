@@ -9,7 +9,7 @@ from app.paths import data_dir, ensure_user_directories
 from models import LapResult, SectorResult, TelemetrySample
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class LapStorage:
@@ -55,6 +55,8 @@ class LapStorage:
                     started_at TEXT NOT NULL,
                     completed_at TEXT,
                     notes TEXT,
+                    fully_observed INTEGER NOT NULL DEFAULT 1,
+                    raw_samples_recorded INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(session_id) REFERENCES telemetry_sessions(id) ON DELETE CASCADE
                 );
 
@@ -100,6 +102,11 @@ class LapStorage:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(sectors)")}
             if "timing_source" not in columns:
                 connection.execute("ALTER TABLE sectors ADD COLUMN timing_source TEXT")
+            lap_columns = {row[1] for row in connection.execute("PRAGMA table_info(laps)")}
+            if "fully_observed" not in lap_columns:
+                connection.execute("ALTER TABLE laps ADD COLUMN fully_observed INTEGER NOT NULL DEFAULT 1")
+            if "raw_samples_recorded" not in lap_columns:
+                connection.execute("ALTER TABLE laps ADD COLUMN raw_samples_recorded INTEGER NOT NULL DEFAULT 0")
             connection.execute(
                 """
                 DELETE FROM sectors
@@ -156,15 +163,17 @@ class LapStorage:
             )
             connection.commit()
 
-    def save_lap(self, lap: LapResult) -> None:
+    def save_lap(self, lap: LapResult, include_samples: bool | None = None) -> None:
+        save_samples = lap.raw_samples_recorded if include_samples is None else include_samples
+        lap.raw_samples_recorded = bool(save_samples)
         with closing(self.connect()) as connection:
             connection.execute("BEGIN")
             connection.execute(
                 """
                 INSERT OR REPLACE INTO laps
                 (id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
-                 car, driver_name, started_at, completed_at, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lap.id,
@@ -180,6 +189,8 @@ class LapStorage:
                     lap.started_at,
                     lap.completed_at,
                     lap.notes,
+                    int(lap.fully_observed),
+                    int(lap.raw_samples_recorded),
                 ),
             )
             connection.execute("DELETE FROM sectors WHERE lap_id = ?", (lap.id,))
@@ -214,7 +225,7 @@ class LapStorage:
                 """,
                 [
                     sample_row(lap.id, index, sample)
-                    for index, sample in enumerate(lap.samples)
+                    for index, sample in enumerate(lap.samples if save_samples else [])
                 ],
             )
             connection.commit()
@@ -224,7 +235,7 @@ class LapStorage:
             lap_rows = connection.execute(
                 """
                 SELECT id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
-                       car, driver_name, started_at, completed_at, notes
+                       car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded
                 FROM laps
                 ORDER BY started_at DESC, lap_number DESC
                 """
@@ -272,6 +283,8 @@ class LapStorage:
                         started_at=row[10],
                         completed_at=row[11],
                         notes=row[12] or "",
+                        fully_observed=bool(row[13]),
+                        raw_samples_recorded=bool(row[14]),
                         sectors=sectors,
                         samples=samples,
                     )

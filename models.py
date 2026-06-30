@@ -24,6 +24,8 @@ class TelemetrySample:
     completed_laps: int | None = None
     current_sector_index: int | None = None
     current_split_time_ms: int | None = None
+    cumulative_split_1_ms: int | None = None
+    cumulative_split_2_ms: int | None = None
     last_sector_time_ms: int | None = None
     last_lap_time_ms: int | None = None
     best_lap_time_ms: int | None = None
@@ -104,6 +106,8 @@ class LapResult:
     session_id: str = ""
     sectors: list[SectorResult] = field(default_factory=list)
     samples: list[TelemetrySample] = field(default_factory=list)
+    fully_observed: bool = True
+    raw_samples_recorded: bool = False
     started_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))
     completed_at: str | None = None
     notes: str = ""

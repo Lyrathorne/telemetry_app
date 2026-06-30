@@ -343,7 +343,7 @@ def positive_time_or_none(value: int | None) -> int | None:
 
 def first_time_or_none(*values: int | None) -> int | None:
     for value in values:
-        if value is not None and int(value) > 0:
+        if value is not None and int(value) >= 0:
             return int(value)
     return None
 
@@ -354,10 +354,21 @@ def parse_acc_time_text(value: str) -> int | None:
         return None
     try:
         parts = text.split(":")
+        if len(parts) > 3:
+            return None
+        if len(parts) == 3 and "." not in parts[2] and parts[2].isdigit() and len(parts[2]) <= 3:
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+            millis = int(parts[2].ljust(3, "0"))
+            if seconds >= 60:
+                return None
+            return ((minutes * 60) + seconds) * 1000 + millis
         seconds_text = parts[-1]
         seconds = float(seconds_text)
+        if seconds >= 60:
+            return None
         minutes = int(parts[-2]) if len(parts) >= 2 else 0
-        hours = int(parts[-3]) if len(parts) >= 3 else 0
+        hours = int(parts[-3]) if len(parts) == 3 else 0
         return int(round(((hours * 60 + minutes) * 60 + seconds) * 1000))
     except (ValueError, IndexError):
         return None

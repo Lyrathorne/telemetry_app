@@ -179,11 +179,11 @@ class MainWindow(QMainWindow):
         self.stop_source_action = QAction("Stop source", self)
         self.stop_source_action.triggered.connect(self.stop_active_source)
 
-        self.start_recording_action = QAction("Start recording", self)
+        self.start_recording_action = QAction("Start raw recording", self)
         self.start_recording_action.setShortcut(QKeySequence("Ctrl+R"))
         self.start_recording_action.triggered.connect(self.toggle_recording)
 
-        self.stop_recording_action = QAction("Stop recording", self)
+        self.stop_recording_action = QAction("Stop raw recording", self)
         self.stop_recording_action.triggered.connect(self.stop_recording)
 
         self.settings_action = QAction("Application settings...", self)
@@ -413,9 +413,9 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_selected_source)
         self.stop_button.clicked.connect(self.stop_active_source)
 
-        self.record_button = QPushButton("Start recording")
+        self.record_button = QPushButton("Start raw recording")
         self.record_button.clicked.connect(self.toggle_recording)
-        self.recording_label = QLabel("Recording: off")
+        self.recording_label = QLabel("Raw recording: off")
         self.recording_count_label = QLabel("Samples: 0")
 
         self.source_label = QLabel("Source: --")
@@ -1370,15 +1370,15 @@ class MainWindow(QMainWindow):
     def start_recording(self) -> None:
         self.recording_samples.clear()
         self.is_recording = True
-        self.record_button.setText("Stop recording")
-        self.recording_label.setText("Recording: on")
+        self.record_button.setText("Stop raw recording")
+        self.recording_label.setText("Raw recording: on")
         self.recording_count_label.setText("Samples: 0")
         self._update_actions()
 
     def stop_recording(self) -> None:
         self.is_recording = False
-        self.record_button.setText("Start recording")
-        self.recording_label.setText("Recording: off")
+        self.record_button.setText("Start raw recording")
+        self.recording_label.setText("Raw recording: off")
         self._update_actions()
 
     def save_recorded_session(self) -> None:
