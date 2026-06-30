@@ -151,18 +151,18 @@ class PanelAndLapTests(unittest.TestCase):
             tracker = LapTracker(storage)
             tracker.start_session("ACC", "Track", "Car")
             tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
-            tracker.process_sample(lap_sample(31.284, 31284, 0.30, 0, 1, split_ms=31284))
-            tracker.process_sample(lap_sample(74.135, 74135, 0.68, 0, 2, split_ms=74135))
+            tracker.process_sample(lap_sample(31.284, 31284, 0.30, 0, 1, split_ms=31284, last_sector_ms=31284))
+            tracker.process_sample(lap_sample(74.135, 74135, 0.68, 0, 2, split_ms=74135, last_sector_ms=42851))
             finish = lap_sample(106.942, 100, 0.01, 1, 0, last_sector_ms=32807)
             finish.last_lap_time_ms = 106942
             completed = tracker.process_sample(finish)
 
             self.assertIsNotNone(completed)
             self.assertEqual([sector.time_ms for sector in completed.sectors], [31284, 42851, 32807])
-            self.assertEqual([sector.timing_source for sector in completed.sectors], ["acc_cumulative_split"] * 3)
+            self.assertEqual([sector.timing_source for sector in completed.sectors], ["acc_direct_sector"] * 3)
             loaded = storage.load_laps()
             self.assertEqual([sector.time_ms for sector in loaded[0].sectors], [31284, 42851, 32807])
-            self.assertEqual(loaded[0].sectors[2].timing_source, "acc_cumulative_split")
+            self.assertEqual(loaded[0].sectors[2].timing_source, "acc_direct_sector")
 
     def test_observed_cumulative_splits_are_converted_to_individual_sector_durations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -181,7 +181,10 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual(sector_times, [59617, 46113, 24675])
             self.assertNotEqual(sector_times[1], 105730)
             self.assertEqual(sum(sector_times), completed.lap_time_ms)
-            self.assertEqual([sector.timing_source for sector in completed.sectors[:3]], ["acc_cumulative_split"] * 3)
+            self.assertEqual(
+                [sector.timing_source for sector in completed.sectors[:3]],
+                ["acc_direct_sector", "acc_cumulative_split", "sector_transition_derived"],
+            )
 
     def test_second_observed_cumulative_split_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -206,9 +209,9 @@ class PanelAndLapTests(unittest.TestCase):
             tracker.start_session("ACC", "Track", "Car")
             tracker.process_sample(lap_sample(0.000, 0, 0.0, 0, 0))
             tracker.process_sample(lap_sample(40.200, 40200, 0.31, 0, 0))
-            tracker.process_sample(lap_sample(40.220, 40220, 0.32, 0, 1))
+            tracker.process_sample(lap_sample(40.220, 40220, 0.32, 0, 1, split_ms=20))
             tracker.process_sample(lap_sample(83.520, 83520, 0.65, 0, 1))
-            tracker.process_sample(lap_sample(83.540, 83540, 0.66, 0, 2))
+            tracker.process_sample(lap_sample(83.540, 83540, 0.66, 0, 2, split_ms=22))
             finish = lap_sample(125.012, 2, 0.01, 1, 0)
             finish.last_lap_time_ms = 125012
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -186,6 +187,7 @@ class LapTracker(QObject):
         self._metadata_updated = False
         self._last_frozen_lap_graph_id = ""
         self._last_graph_reset_reason = "No graph reset"
+        self._timing_diagnostics_enabled = os.environ.get("RACING_TELEMETRY_ACC_TIMING_DIAGNOSTICS") == "1"
         self._logger = logging.getLogger(__name__)
 
     def start_session(self, game: str, track: str | None, car: str | None, driver_name: str | None = None) -> None:
@@ -328,6 +330,11 @@ class LapTracker(QObject):
         self._cumulative_splits_ms = {}
         self._partial_start_sector_index = sample.current_sector_index if partial_first else None
         self.last_event = "Partial lap started" if partial_first else "Lap started"
+        self._log_timing_debug(
+            "Lap Started",
+            sample,
+            extra=f"lap_start_time_ms={self._last_sector_start_ms}",
+        )
         self._set_timing_state(
             TimingState.PARTIAL_LAP if partial_first else TimingState.TRACKING_LAP,
             self._tracking_reason(sample, partial_first=partial_first),
@@ -426,6 +433,7 @@ class LapTracker(QObject):
         self._append_completed_sector(int(self._last_sector_index), sample)
         self._last_sector_index = sector_index
         self._last_sector_start_ms = sample.current_lap_time_ms
+        self._log_timing_debug(f"Entered Sector {sector_index + 1}", sample)
 
     def _finalize_open_sector(self, lap: LapResult, sample: TelemetrySample) -> None:
         if self._last_sector_index is None:
@@ -448,10 +456,9 @@ class LapTracker(QObject):
         sector_time, source = self._sector_time_from_sample(sector_index, sample, lap_time_ms)
         if sector_time is not None:
             self._completed_sector_total_ms += sector_time
-        if source in {"acc_cumulative_split", "acc_sector_transition_snapshot"} and sector_index in (0, 1):
-            boundary_lap_time_ms = sample.current_split_time_ms or sample.current_lap_time_ms
-            if boundary_lap_time_ms is not None:
-                self._cumulative_splits_ms[sector_index + 1] = int(boundary_lap_time_ms)
+        boundary_lap_time_ms = self._boundary_lap_time_ms(sector_index, sample, lap_time_ms)
+        if boundary_lap_time_ms is not None and sector_index in (0, 1):
+            self._cumulative_splits_ms[sector_index + 1] = int(boundary_lap_time_ms)
         target_lap.sectors.append(
             SectorResult(
                 sector_number=sector_number,
@@ -462,6 +469,14 @@ class LapTracker(QObject):
             )
         )
         self.last_event = f"Sector completed: S{sector_number} source={source} time_ms={sector_time}"
+        self._log_timing_debug(
+            "Lap Finished" if sector_index == 2 else f"Sector {sector_number} completed",
+            sample,
+            extra=(
+                f"Sector{sector_number}={sector_time} source={source} "
+                f"boundary_ms={boundary_lap_time_ms} lap_ms={lap_time_ms}"
+            ),
+        )
 
     def _sector_time_from_sample(
         self,
@@ -471,24 +486,65 @@ class LapTracker(QObject):
     ) -> tuple[int | None, str]:
         if self._partial_start_sector_index == sector_index:
             return None, "partial_lap_unavailable"
+        if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
+            if self._direct_sector_time_is_plausible(sector_index, int(sample.last_sector_time_ms), sample, lap_time_ms):
+                return int(sample.last_sector_time_ms), "acc_direct_sector"
         if sector_index in (0, 1):
-            boundary_lap_time_ms = sample.current_split_time_ms or sample.current_lap_time_ms
+            boundary_lap_time_ms = self._boundary_lap_time_ms(sector_index, sample, lap_time_ms)
             if boundary_lap_time_ms is not None:
                 previous_boundary_ms = self._cumulative_splits_ms.get(sector_index, 0)
                 if boundary_lap_time_ms > previous_boundary_ms:
-                    source = "acc_cumulative_split" if sample.current_split_time_ms is not None else "acc_sector_transition_snapshot"
+                    source = (
+                        "acc_cumulative_split"
+                        if self._split_matches_boundary(sample.current_split_time_ms, boundary_lap_time_ms)
+                        else "sector_transition_derived"
+                    )
                     return boundary_lap_time_ms - previous_boundary_ms, source
         if sector_index == 2:
             final_lap_time = sample.last_lap_time_ms or lap_time_ms
             cumulative_split_2_ms = self._cumulative_splits_ms.get(2)
             if final_lap_time is not None and cumulative_split_2_ms is not None and final_lap_time > cumulative_split_2_ms:
-                return final_lap_time - cumulative_split_2_ms, "acc_cumulative_split"
+                return final_lap_time - cumulative_split_2_ms, "sector_transition_derived"
             if final_lap_time is not None and final_lap_time > self._completed_sector_total_ms:
                 return final_lap_time - self._completed_sector_total_ms, "sector_transition_derived"
-        if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
-            if lap_time_ms is None or self._completed_sector_total_ms + sample.last_sector_time_ms <= lap_time_ms + SECTOR_SUM_TOLERANCE_MS:
-                return sample.last_sector_time_ms, "acc_direct_sector"
         return None, "unavailable"
+
+    def _direct_sector_time_is_plausible(
+        self,
+        sector_index: int,
+        sector_time_ms: int,
+        sample: TelemetrySample,
+        lap_time_ms: int | None,
+    ) -> bool:
+        if sector_time_ms <= 0:
+            return False
+        if sector_index == 2:
+            final_lap_time = sample.last_lap_time_ms or lap_time_ms
+            return final_lap_time is None or self._completed_sector_total_ms + sector_time_ms <= final_lap_time + SECTOR_SUM_TOLERANCE_MS
+        boundary_lap_time_ms = self._boundary_lap_time_ms(sector_index, sample, lap_time_ms)
+        if boundary_lap_time_ms is None:
+            return True
+        previous_boundary_ms = self._cumulative_splits_ms.get(sector_index, 0)
+        expected_sector_ms = boundary_lap_time_ms - previous_boundary_ms
+        return abs(sector_time_ms - expected_sector_ms) <= SECTOR_SUM_TOLERANCE_MS
+
+    def _boundary_lap_time_ms(
+        self,
+        sector_index: int,
+        sample: TelemetrySample,
+        lap_time_ms: int | None = None,
+    ) -> int | None:
+        if sector_index == 2:
+            return sample.last_lap_time_ms or lap_time_ms
+        if self._split_matches_boundary(sample.current_split_time_ms, sample.current_lap_time_ms):
+            return int(sample.current_split_time_ms)
+        if sample.current_lap_time_ms is not None:
+            return int(sample.current_lap_time_ms)
+        return None
+
+    @staticmethod
+    def _split_matches_boundary(split_ms: int | None, boundary_ms: int | None) -> bool:
+        return split_ms is not None and boundary_ms is not None and abs(int(split_ms) - int(boundary_ms)) <= SECTOR_SUM_TOLERANCE_MS
 
     def _validate_completed_sector_timing(self, lap: LapResult) -> None:
         if lap.lap_time_ms is None:
@@ -653,6 +709,29 @@ class LapTracker(QObject):
         self._partial_start_sector_index = None
         self.last_event = reason
         self._set_timing_state(TimingState.WAITING_FOR_SESSION, f"Waiting: {reason}")
+
+    def _log_timing_debug(self, event: str, sample: TelemetrySample, extra: str = "") -> None:
+        if not self._timing_diagnostics_enabled:
+            return
+        lap_number = self.active_lap.lap_number if self.active_lap is not None else sample.lap_number
+        sectors = {}
+        if self.active_lap is not None:
+            sectors = {sector.sector_number: sector.time_ms for sector in self.active_lap.sectors}
+        self._logger.info(
+            "ACC lap timing debug: Lap %s | %s | Timestamp=%s current_lap_time_ms=%s "
+            "last_lap_time_ms=%s sector_index=%s completed_laps=%s S1=%s S2=%s S3=%s %s",
+            lap_number,
+            event,
+            sample.timestamp,
+            sample.current_lap_time_ms,
+            sample.last_lap_time_ms,
+            sample.current_sector_index,
+            sample.completed_laps,
+            sectors.get(1),
+            sectors.get(2),
+            sectors.get(3),
+            extra,
+        )
 
     def _remember_sample_state(self, sample: TelemetrySample) -> None:
         self._last_current_lap_time_ms = sample.current_lap_time_ms
