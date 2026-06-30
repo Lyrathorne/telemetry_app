@@ -21,7 +21,7 @@ def main() -> int:
 
         app = QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
-        window = MainWindow()
+        window = MainWindow(reset_layout="--reset-layout" in sys.argv)
 
         if "--demo" in sys.argv:
             window.select_source("demo")

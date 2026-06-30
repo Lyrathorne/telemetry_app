@@ -13,6 +13,10 @@ class DetachedPanelWindow(QMainWindow):
         self.panel_widget = panel_widget
         self.setObjectName(f"detached_{dock.objectName()}")
         self.setWindowTitle(dock.windowTitle())
+        self.setWindowOpacity(1.0)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        panel_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setCentralWidget(panel_widget)
         self.resize(max(640, panel_widget.width()), max(420, panel_widget.height()))
 

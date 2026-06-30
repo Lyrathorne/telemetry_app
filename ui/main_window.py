@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -50,6 +52,8 @@ from telemetry.lap_tracker import LapTracker
 from telemetry.session_store import SessionStore
 from ui.graph_panel import GraphPanel, PENS
 from ui.docking import DetachedPanelWindow, install_dock_context_menu
+from ui.panel_registry import PanelRegistry
+from ui.panel_templates import BUILTIN_LAYOUTS, PANEL_TEMPLATES, TEMPLATE_GROUPS, PanelTemplate
 
 try:
     import pyqtgraph as pg
@@ -57,8 +61,11 @@ except ImportError:  # pragma: no cover
     pg = None
 
 
+LAYOUT_SCHEMA_VERSION = 2
+
+
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, reset_layout: bool = False) -> None:
         super().__init__()
         self.settings = AppSettings()
         self.session_store = SessionStore()
@@ -72,7 +79,15 @@ class MainWindow(QMainWindow):
         self.shared_memory_labels: dict[str, QLabel] = {}
         self.docks: dict[str, QDockWidget] = {}
         self.detached_windows: dict[str, DetachedPanelWindow] = {}
+        self.panel_registry = PanelRegistry()
+        self.panel_templates: dict[str, str] = {}
+        self._panel_type_counters: dict[str, int] = {}
+        self._layout_restore_count = 0
+        self._reset_layout_requested = reset_layout
         self.graph_panels: list[GraphPanel] = []
+        self.live_value_panels: list[dict[str, QLabel]] = []
+        self.live_lap_tables: list[QTableWidget] = []
+        self.sector_timing_tables: list[QTableWidget] = []
         self.graph_counter = 0
         self.recording_samples: list[TelemetrySample] = []
         self.is_recording = False
@@ -102,7 +117,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_toolbar()
         self._build_interface()
-        self._load_saved_layout()
+        self._restore_startup_layout()
         self._show_stopped_telemetry()
         self._populate_sessions_table()
         self._source_selection_changed()
@@ -135,6 +150,9 @@ class MainWindow(QMainWindow):
         self.add_graph_action = QAction("Add graph panel", self)
         self.add_graph_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
         self.add_graph_action.triggered.connect(self.add_graph_panel)
+
+        self.add_panel_action = QAction("Add telemetry panel", self)
+        self.add_panel_action.triggered.connect(self.show_panel_picker_hint)
 
         self.reset_layout_action = QAction("Reset layout", self)
         self.reset_layout_action.setShortcut(QKeySequence("Ctrl+0"))
@@ -186,15 +204,20 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.fullscreen_action)
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.add_graph_action)
+        self.add_panel_menu = self.view_menu.addMenu("Add telemetry panel")
+        self._populate_add_panel_menu(self.add_panel_menu)
         self.view_menu.addAction(self.reset_layout_action)
         self.view_menu.addAction(self.recover_panels_action)
 
         layouts_menu = self.menuBar().addMenu("Layouts")
-        for name in ("Default", "Live Driving", "Telemetry Analysis"):
+        for name in ("Live driving", "Timing", "Analysis", "Diagnostics"):
             action = QAction(name, self)
             action.triggered.connect(lambda _checked=False, layout_name=name: self.apply_builtin_layout(layout_name))
             layouts_menu.addAction(action)
         layouts_menu.addSeparator()
+        restore_default_action = QAction("Restore default", self)
+        restore_default_action.triggered.connect(self.reset_layout)
+        layouts_menu.addAction(restore_default_action)
         layouts_menu.addAction(self.save_layout_action)
         layouts_menu.addAction(self.load_layout_action)
 
@@ -219,10 +242,29 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.import_action)
         toolbar.addAction(self.fullscreen_action)
         toolbar.addAction(self.add_graph_action)
+        panel_button = toolbar.addAction("Add telemetry panel")
+        panel_button.triggered.connect(lambda: self.add_panel_menu.exec(toolbar.mapToGlobal(toolbar.rect().bottomLeft())))
         self.addToolBar(toolbar)
 
+    def _populate_add_panel_menu(self, menu: QMenu) -> None:
+        for group_name, template_ids in TEMPLATE_GROUPS.items():
+            group_menu = menu.addMenu(group_name)
+            for template_id in template_ids:
+                template = PANEL_TEMPLATES[template_id]
+                action = QAction(template.title, self)
+                action.setStatusTip(template.description)
+                action.setToolTip(template.description)
+                action.triggered.connect(lambda _checked=False, item=template_id: self.create_panel_from_template(item))
+                group_menu.addAction(action)
+
+    def show_panel_picker_hint(self) -> None:
+        self.add_panel_menu.exec(self.mapToGlobal(self.rect().center()))
+
     def _build_interface(self) -> None:
-        self.setCentralWidget(self._create_source_controls())
+        central = self._create_source_controls()
+        central.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        central.customContextMenuRequested.connect(lambda position: self.add_panel_menu.exec(central.mapToGlobal(position)))
+        self.setCentralWidget(central)
         self._add_dock("live_telemetry", "Live Telemetry", self._create_telemetry_widget(), Qt.DockWidgetArea.LeftDockWidgetArea)
         self._add_dock("source_status", "Source Status", self._create_common_status_widget(), Qt.DockWidgetArea.LeftDockWidgetArea)
         self.connection_diagnostics_dock = self._add_dock(
@@ -249,24 +291,32 @@ class MainWindow(QMainWindow):
             self._create_laps_widget(),
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
-        self.add_graph_panel("Live Graphs")
-        self._restore_graph_panel_settings()
+        self.add_graph_panel("Live Graphs", panel_id="graph_panel_1", template_id="live_graph")
+        self._restore_first_graph_panel_settings()
 
         for dock in self.docks.values():
             self.view_menu.addAction(dock.toggleViewAction())
 
     def _add_dock(self, object_name: str, title: str, widget: QWidget, area: Qt.DockWidgetArea) -> QDockWidget:
+        if object_name in self.docks:
+            self._logger.warning("Attempted to create duplicate dock %s", object_name)
+            return self.docks[object_name]
         dock = QDockWidget(title, self)
         dock.setObjectName(object_name)
         dock.setWidget(widget)
         dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
+        dock.setWindowOpacity(1.0)
+        dock.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        dock.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.addDockWidget(area, dock)
         self.docks[object_name] = dock
+        self.panel_registry.register(object_name, "builtin", title, dock, widget, singleton=True)
         install_dock_context_menu(self, dock)
         return dock
 
@@ -495,25 +545,244 @@ class MainWindow(QMainWindow):
         scroll.setWidget(widget)
         return scroll
 
-    def add_graph_panel(self, title: str | None = None) -> None:
-        self.graph_counter += 1
+    def add_graph_panel(
+        self,
+        title: str | None = None,
+        config: dict | None = None,
+        panel_id: str | None = None,
+        template_id: str = "graph",
+    ) -> str:
+        if panel_id is None:
+            panel_id = self._next_panel_id("graph_panel")
+        elif panel_id in self.docks:
+            self._logger.warning("Graph panel already exists: %s", panel_id)
+            return panel_id
+        self.graph_counter = max(self.graph_counter, self._numeric_suffix(panel_id))
         panel_title = title or f"Graph Panel {self.graph_counter}"
         panel = GraphPanel(panel_title, self.settings.graph_refresh_ms(), self.settings.graph_history_limit(), self)
+        if config:
+            panel.restore_settings_state(config)
         self.graph_panels.append(panel)
-        dock_id = f"graph_panel_{self.graph_counter}"
-        dock = self._add_dock(dock_id, panel_title, panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        dock = self._add_dock(panel_id, panel_title, panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        record = self.panel_registry.get(panel_id)
+        if record is not None:
+            record.panel_type = "graph"
+            record.singleton = False
+        self.panel_templates[panel_id] = template_id
         dock.visibilityChanged.connect(self._update_actions)
         if hasattr(self, "view_menu"):
             self.view_menu.addAction(dock.toggleViewAction())
+        return panel_id
 
-    def _restore_graph_panel_settings(self) -> None:
+    def _restore_first_graph_panel_settings(self) -> None:
         states = self.settings.graph_panels_state()
         if not states:
             return
-        while len(self.graph_panels) < len(states):
-            self.add_graph_panel()
-        for panel, state in zip(self.graph_panels, states):
+        self.graph_panels[0].restore_settings_state(states[0])
+
+    def _next_panel_id(self, prefix: str) -> str:
+        counter = self._panel_type_counters.get(prefix, 0)
+        while True:
+            counter += 1
+            candidate = f"{prefix}_{counter}"
+            if candidate not in self.docks and candidate not in self.detached_windows:
+                self._panel_type_counters[prefix] = counter
+                return candidate
+
+    @staticmethod
+    def _numeric_suffix(panel_id: str) -> int:
+        try:
+            return int(panel_id.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def create_panel_from_template(self, template_id: str) -> str | None:
+        template = PANEL_TEMPLATES.get(template_id)
+        if template is None:
+            self._logger.warning("Unknown panel template ignored: %s", template_id)
+            return None
+        if template.panel_type == "builtin":
+            panel_id = template.template_id
+            dock = self.docks.get(panel_id)
+            if dock is not None:
+                dock.show()
+                dock.raise_()
+                return panel_id
+            return None
+        if template.singleton:
+            existing = self._find_template_panel(template_id)
+            if existing:
+                self.docks[existing].show()
+                self.docks[existing].raise_()
+                return existing
+
+        prefix = template.template_id
+        panel_id = self._next_panel_id(prefix)
+        if template.panel_type == "graph":
+            return self.add_graph_panel(template.title, template.default_config, panel_id=panel_id, template_id=template.template_id)
+        widget = self._create_template_widget(template, panel_id)
+        if widget is None:
+            return None
+        dock = self._add_dock(panel_id, template.title, widget, Qt.DockWidgetArea.RightDockWidgetArea)
+        record = self.panel_registry.get(panel_id)
+        if record is not None:
+            record.panel_type = template.panel_type
+            record.singleton = template.singleton
+        self.panel_templates[panel_id] = template_id
+        if hasattr(self, "view_menu"):
+            self.view_menu.addAction(dock.toggleViewAction())
+        self._update_actions()
+        return panel_id
+
+    def _find_template_panel(self, template_id: str) -> str | None:
+        for panel_id, saved_template_id in self.panel_templates.items():
+            if saved_template_id == template_id and panel_id in self.docks:
+                return panel_id
+        return None
+
+    def _create_template_widget(self, template: PanelTemplate, panel_id: str) -> QWidget | None:
+        if template.panel_type == "stacked_graph":
+            return self._create_stacked_graph_widget(template)
+        if template.panel_type == "live_values":
+            return self._create_template_live_values_widget()
+        if template.panel_type == "live_lap_timing":
+            return self._create_live_lap_timing_widget()
+        if template.panel_type == "sector_timing":
+            return self._create_sector_timing_widget()
+        if template.panel_type == "lap_history":
+            return self._create_lap_history_template_widget()
+        if template.panel_type == "best_laps":
+            return self._create_best_laps_widget()
+        if template.panel_type == "lap_comparison":
+            return self._create_lap_comparison_template_widget()
+        if template.panel_type == "time_delta_graph":
+            return self._create_time_delta_template_widget()
+        self._logger.warning("Unsupported panel type ignored: %s", template.panel_type)
+        return None
+
+    def _create_stacked_graph_widget(self, template: PanelTemplate) -> QWidget:
+        wrapper = QWidget(self)
+        layout = QVBoxLayout(wrapper)
+        for graph_config in template.default_config.get("graphs", []):
+            panel = GraphPanel(graph_config.get("title", template.title), self.settings.graph_refresh_ms(), self.settings.graph_history_limit(), wrapper)
+            state = {
+                "metrics": graph_config.get("metrics", []),
+                "x_mode": template.default_config.get("x_mode", "follow_live"),
+                "recent_window": template.default_config.get("recent_window", 30),
+                "y_mode": "metric_default",
+                "manual_y": graph_config.get("manual_y", [0.0, 100.0]),
+                "settings_hidden": template.default_config.get("settings_hidden", True),
+            }
             panel.restore_settings_state(state)
+            self.graph_panels.append(panel)
+            layout.addWidget(panel)
+        return wrapper
+
+    def _create_template_live_values_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QGridLayout(widget)
+        labels: dict[str, QLabel] = {}
+        rows = [
+            ("speed", "Speed"),
+            ("rpm", "RPM"),
+            ("gear", "Gear"),
+            ("throttle", "Throttle"),
+            ("brake", "Brake"),
+            ("clutch", "Clutch"),
+            ("steering", "Steering"),
+            ("lap", "Current lap"),
+            ("sector", "Current sector"),
+            ("lap_time", "Current lap time"),
+            ("last_lap", "Last lap"),
+            ("best_lap", "Best lap"),
+            ("delta", "Delta"),
+        ]
+        for row, (key, title) in enumerate(rows):
+            value = QLabel("--")
+            layout.addWidget(QLabel(f"{title}:"), row, 0)
+            layout.addWidget(value, row, 1)
+            labels[key] = value
+        self.live_value_panels.append(labels)
+        return widget
+
+    def _create_live_lap_timing_widget(self) -> QWidget:
+        table = QTableWidget(1, 7, self)
+        table.setHorizontalHeaderLabels(["Lap", "Lap time", "Sector 1", "Sector 2", "Sector 3", "Delta", "Status"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        for column, value in enumerate(["--", "--", "--", "--", "--", "--", "Current"]):
+            table.setItem(0, column, QTableWidgetItem(value))
+        self.live_lap_tables.append(table)
+        return table
+
+    def _create_sector_timing_widget(self) -> QWidget:
+        table = QTableWidget(3, 4, self)
+        table.setHorizontalHeaderLabels(["Sector", "Time", "Delta", "Status"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for row in range(3):
+            for column, value in enumerate([f"S{row + 1}", "--", "--", "Waiting"]):
+                table.setItem(row, column, QTableWidgetItem(value))
+        self.sector_timing_tables.append(table)
+        return table
+
+    def _create_lap_history_template_widget(self) -> QWidget:
+        table = QTableWidget(len(self.saved_laps), 10, self)
+        table.setHorizontalHeaderLabels(["Date", "Session", "Driver", "Track", "Car", "Lap", "Lap time", "S1", "S2", "S3", "Valid"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for row, lap in enumerate(self.saved_laps):
+            sectors = [format_time_ms(sector.time_ms) for sector in lap.sectors[:3]]
+            while len(sectors) < 3:
+                sectors.append("--")
+            values = [
+                lap.started_at,
+                lap.session_id,
+                lap.driver_name or "--",
+                lap.track or "--",
+                lap.car or "--",
+                str(lap.lap_number),
+                format_time_ms(lap.lap_time_ms),
+                *sectors,
+                "Yes" if lap.valid else "No",
+            ]
+            for column, value in enumerate(values[:10]):
+                table.setItem(row, column, QTableWidgetItem(value))
+        return table
+
+    def _create_best_laps_widget(self) -> QWidget:
+        laps = sorted([lap for lap in self.saved_laps if lap.complete and lap.valid and lap.lap_time_ms is not None], key=lambda lap: lap.lap_time_ms or 0)
+        table = QTableWidget(len(laps), 8, self)
+        table.setHorizontalHeaderLabels(["Rank", "Driver", "Lap time", "S1", "S2", "S3", "Car", "Delta"])
+        fastest = laps[0].lap_time_ms if laps else None
+        for row, lap in enumerate(laps):
+            sectors = [format_time_ms(sector.time_ms) for sector in lap.sectors[:3]]
+            while len(sectors) < 3:
+                sectors.append("--")
+            delta = "--" if fastest is None or lap.lap_time_ms is None else f"+{(lap.lap_time_ms - fastest) / 1000.0:.3f}s"
+            values = [str(row + 1), lap.driver_name or "--", format_time_ms(lap.lap_time_ms), *sectors, lap.car or "--", delta]
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
+        return table
+
+    def _create_lap_comparison_template_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.addWidget(QLabel("Select saved laps in Lap history, then use Compare selected laps."))
+        layout.addWidget(self._create_comparison_widget())
+        return widget
+
+    def _create_time_delta_template_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.addWidget(QLabel("Time delta is available after choosing compatible saved laps."))
+        if pg is None:
+            layout.addWidget(QLabel("pyqtgraph is not available."))
+        else:
+            plot = pg.PlotWidget()
+            plot.setLabel("left", "Delta", units="s")
+            plot.setLabel("bottom", "Lap position")
+            plot.addLine(y=0.0, pen=pg.mkPen("#888888", width=1))
+            layout.addWidget(plot)
+        return widget
 
     def start_selected_source(self) -> None:
         if self.active_source is not None:
@@ -583,10 +852,61 @@ class MainWindow(QMainWindow):
         self.common_labels["session_state"].setText(sample.session_state or "--")
         for panel in self.graph_panels:
             panel.add_sample(sample)
+        self._update_live_value_template_panels(sample)
+        self._update_live_lap_template_panels(sample)
+        self._update_sector_template_panels(sample)
         self.lap_tracker.process_sample(sample)
         if self.is_recording:
             self.recording_samples.append(sample)
             self.recording_count_label.setText(f"Samples: {len(self.recording_samples)}")
+
+    def _update_live_value_template_panels(self, sample: TelemetrySample) -> None:
+        for labels in self.live_value_panels:
+            labels["speed"].setText(f"{sample.speed_kmh:.0f} km/h")
+            labels["rpm"].setText(f"{sample.rpm} rpm")
+            labels["gear"].setText(format_gear(sample.gear))
+            labels["throttle"].setText(f"{max(0.0, sample.throttle_percent):.0f}%")
+            labels["brake"].setText(f"{max(0.0, sample.brake_percent):.0f}%")
+            labels["clutch"].setText("--" if sample.clutch_percent is None else f"{max(0.0, sample.clutch_percent):.0f}%")
+            labels["steering"].setText("--" if sample.steering is None else f"{sample.steering:.1f}")
+            labels["lap"].setText("--" if sample.lap_number is None else str(sample.lap_number))
+            labels["sector"].setText("--" if sample.current_sector_index is None else f"S{sample.current_sector_index + 1}")
+            labels["lap_time"].setText(format_time_ms(sample.current_lap_time_ms))
+            labels["last_lap"].setText(format_time_ms(sample.last_lap_time_ms))
+            labels["best_lap"].setText("--")
+            labels["delta"].setText("Unavailable")
+
+    def _update_live_lap_template_panels(self, sample: TelemetrySample) -> None:
+        for table in self.live_lap_tables:
+            row = table.rowCount() - 1
+            values = [
+                "--" if sample.lap_number is None else str(sample.lap_number),
+                format_time_ms(sample.current_lap_time_ms),
+                "--",
+                "--",
+                "--",
+                "Unavailable",
+                "Invalid" if sample.invalid_lap else ("Pit" if sample.in_pit else "Current"),
+            ]
+            for column, value in enumerate(values):
+                item = table.item(row, column)
+                if item is None:
+                    table.setItem(row, column, QTableWidgetItem(value))
+                elif item.text() != value:
+                    item.setText(value)
+
+    def _update_sector_template_panels(self, sample: TelemetrySample) -> None:
+        current = sample.current_sector_index
+        for table in self.sector_timing_tables:
+            for row in range(table.rowCount()):
+                status = "Current" if current == row else "Waiting"
+                time_value = "Running" if current == row else "--"
+                for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
+                    item = table.item(row, column)
+                    if item is None:
+                        table.setItem(row, column, QTableWidgetItem(value))
+                    elif item.text() != value:
+                        item.setText(value)
 
     def handle_source_status(self, status: str) -> None:
         self.status_label.setText(f"Status: {status}")
@@ -986,53 +1306,179 @@ class MainWindow(QMainWindow):
 
     def _write_layout(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
-            "state": bytes(self.saveState().toBase64()).decode("ascii"),
-        }
+        data = self._layout_snapshot()
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _read_layout(self, path: Path) -> bool:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            geometry = QByteArray.fromBase64(data["geometry"].encode("ascii"))
-            state = QByteArray.fromBase64(data["state"].encode("ascii"))
-        except (OSError, KeyError, json.JSONDecodeError, TypeError) as error:
+        except (OSError, json.JSONDecodeError, TypeError) as error:
             self._logger.warning("Failed to load layout: %s", error)
             self._show_error("Layout unavailable", f"Could not load layout: {error}")
             return False
-        self.restoreGeometry(geometry)
-        if not self.restoreState(state):
-            self._show_error("Layout unavailable", "The layout file is outdated or incompatible.")
+        if not self._restore_layout_data(data, notify=True):
             return False
-        self._ensure_window_visible()
         return True
 
     def apply_builtin_layout(self, name: str) -> None:
+        for dock_id in list(self.detached_windows):
+            self.dock_panel_back(dock_id)
+        for template_id in BUILTIN_LAYOUTS.get(name, []):
+            self.create_panel_from_template(template_id)
         for dock in self.docks.values():
             dock.show()
-        if name == "Live Driving":
+            dock.setFloating(False)
+        if name == "Live driving":
             self.imported_sessions_dock.hide()
             self.comparison_dock.hide()
-        elif name == "Telemetry Analysis":
+        elif name == "Analysis":
             if self.active_source is None:
                 self.docks["live_telemetry"].hide()
+        elif name == "Diagnostics":
+            for dock_id, dock in self.docks.items():
+                dock.setVisible(dock_id in {"source_status", "connection_diagnostics"})
         self._ensure_window_visible()
 
     def reset_layout(self) -> None:
+        for dock_id in list(self.detached_windows):
+            self.dock_panel_back(dock_id)
+        for dock in self.docks.values():
+            dock.setFloating(False)
         self.apply_builtin_layout("Default")
         self.resize(1100, 760)
 
-    def _load_saved_layout(self) -> None:
+    def _restore_startup_layout(self) -> None:
+        if self._reset_layout_requested:
+            self._logger.info("Skipping saved layout because --reset-layout was requested")
+            self.reset_layout()
+            return
         if not self.settings.restore_layout_at_startup():
             return
-        geometry = self.settings.load_geometry()
-        state = self.settings.load_state()
-        if geometry:
-            self.restoreGeometry(geometry)
-        if state and not self.restoreState(state):
-            self._logger.warning("Saved dock state could not be restored")
+        data = self.settings.load_dashboard_layout()
+        if data is None:
+            if self.settings.load_state() or self.settings.load_geometry():
+                self._logger.warning("Legacy raw Qt layout state was ignored and cleared")
+                self.settings.clear_legacy_window_layout()
+            self.reset_layout()
+            return
+        if not self._restore_layout_data(data, notify=False):
+            self._logger.warning("Saved dashboard layout was invalid; default layout loaded")
+            self.reset_layout()
+
+    def _layout_snapshot(self) -> dict:
+        return {
+            "schema_version": LAYOUT_SCHEMA_VERSION,
+            "geometry": self._byte_array_to_text(self.saveGeometry()),
+            "dock_state": self._byte_array_to_text(self.saveState()),
+            "panels": [
+                {
+                    "panel_id": record.panel_id,
+                    "panel_type": record.panel_type,
+                    "template_id": self.panel_templates.get(record.panel_id, record.panel_type),
+                    "title": record.title,
+                    "visible": record.dock.isVisible(),
+                    "detached": record.panel_id in self.detached_windows,
+                    "config": self._panel_config(record.panel_id),
+                }
+                for record in self.panel_registry.records()
+            ],
+            "detached": [
+                {
+                    "panel_id": panel_id,
+                    "geometry": self._byte_array_to_text(window.saveGeometry()),
+                    "maximized": window.isMaximized(),
+                }
+                for panel_id, window in self.detached_windows.items()
+            ],
+        }
+
+    def _panel_config(self, panel_id: str) -> dict:
+        dock = self.docks.get(panel_id)
+        widget = dock.widget() if dock is not None else None
+        if isinstance(widget, GraphPanel):
+            return widget.settings_state()
+        return {}
+
+    def _restore_layout_data(self, data: dict, notify: bool) -> bool:
+        self._layout_restore_count += 1
+        if data.get("schema_version") != LAYOUT_SCHEMA_VERSION:
+            self._logger.warning("Unsupported layout schema: %s", data.get("schema_version"))
+            if notify:
+                self._show_error("Layout unavailable", "The layout file is outdated or incompatible.")
+            return False
+        panels = data.get("panels", [])
+        if not isinstance(panels, list):
+            return False
+        panel_ids = [item.get("panel_id") for item in panels if isinstance(item, dict)]
+        if len(panel_ids) != len(set(panel_ids)):
+            self._logger.warning("Duplicate panel IDs in saved layout: %s", panel_ids)
+            return False
+
+        for item in panels:
+            if not isinstance(item, dict):
+                continue
+            panel_id = str(item.get("panel_id", ""))
+            template_id = str(item.get("template_id", ""))
+            if not panel_id or panel_id in self.docks:
+                continue
+            template = PANEL_TEMPLATES.get(template_id)
+            if template is None:
+                self._logger.warning("Ignoring unknown panel type in saved layout: %s", template_id)
+                continue
+            if template.panel_type == "graph":
+                self.add_graph_panel(item.get("title") or template.title, item.get("config") or template.default_config, panel_id=panel_id, template_id=template_id)
+            elif template.panel_type != "builtin":
+                widget = self._create_template_widget(template, panel_id)
+                if widget is not None:
+                    dock = self._add_dock(panel_id, item.get("title") or template.title, widget, Qt.DockWidgetArea.RightDockWidgetArea)
+                    record = self.panel_registry.get(panel_id)
+                    if record is not None:
+                        record.panel_type = template.panel_type
+                        record.singleton = template.singleton
+                    self.panel_templates[panel_id] = template_id
+                    self.view_menu.addAction(dock.toggleViewAction())
+
+        geometry_text = data.get("geometry")
+        dock_state_text = data.get("dock_state")
+        if isinstance(geometry_text, str) and geometry_text:
+            self.restoreGeometry(self._text_to_byte_array(geometry_text))
+        if isinstance(dock_state_text, str) and dock_state_text:
+            if not self.restoreState(self._text_to_byte_array(dock_state_text)):
+                self._logger.warning("Versioned dock state could not be restored")
+                return False
+        self._dock_all_qt_floating_widgets()
+        for detached in data.get("detached", []):
+            if not isinstance(detached, dict):
+                continue
+            panel_id = str(detached.get("panel_id", ""))
+            if panel_id in self.docks and panel_id not in self.detached_windows:
+                self.detach_panel(panel_id, show=False)
+                window = self.detached_windows.get(panel_id)
+                if window is not None and isinstance(detached.get("geometry"), str):
+                    window.restoreGeometry(self._text_to_byte_array(detached["geometry"]))
+                    if detached.get("maximized"):
+                        window.showMaximized()
+                    else:
+                        window.show()
+        for item in panels:
+            if isinstance(item, dict) and item.get("panel_id") in self.docks:
+                self.docks[item["panel_id"]].setVisible(bool(item.get("visible", True)) and item["panel_id"] not in self.detached_windows)
         self._ensure_window_visible()
+        return True
+
+    def _dock_all_qt_floating_widgets(self) -> None:
+        for dock in self.docks.values():
+            if dock.isFloating():
+                self._logger.warning("Recovered native floating dock during restore: %s", dock.objectName())
+                dock.setFloating(False)
+
+    @staticmethod
+    def _byte_array_to_text(value: QByteArray) -> str:
+        return bytes(value.toBase64()).decode("ascii")
+
+    @staticmethod
+    def _text_to_byte_array(value: str) -> QByteArray:
+        return QByteArray.fromBase64(value.encode("ascii"))
 
     def _ensure_window_visible(self) -> None:
         screen = QApplication.primaryScreen()
@@ -1042,10 +1488,11 @@ class MainWindow(QMainWindow):
             if screen and not screen.availableGeometry().intersects(window.frameGeometry()):
                 window.move(screen.availableGeometry().topLeft())
 
-    def detach_panel(self, dock_id: str) -> None:
+    def detach_panel(self, dock_id: str, show: bool = True) -> None:
         if dock_id in self.detached_windows:
-            self.detached_windows[dock_id].show()
-            self.detached_windows[dock_id].raise_()
+            if show:
+                self.detached_windows[dock_id].show()
+                self.detached_windows[dock_id].raise_()
             return
         dock = self.docks[dock_id]
         widget = dock.widget()
@@ -1054,8 +1501,10 @@ class MainWindow(QMainWindow):
         dock.setWidget(QWidget())
         dock.hide()
         window = DetachedPanelWindow(self, dock, widget)
+        window.setWindowOpacity(1.0)
         self.detached_windows[dock_id] = window
-        window.show()
+        if show:
+            window.show()
         self._ensure_window_visible()
 
     def dock_panel_back(self, dock_id: str) -> None:
@@ -1188,14 +1637,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop_active_source()
-        for dock_id in list(self.detached_windows):
-            self.dock_panel_back(dock_id)
-        self.settings.save_geometry(self.saveGeometry())
-        self.settings.save_state(self.saveState())
+        self.settings.save_dashboard_layout(self._layout_snapshot())
+        self.settings.clear_legacy_window_layout()
         self.settings.set_graph_panels_state([panel.settings_state() for panel in self.graph_panels])
         self.settings.save_was_maximized(self.isMaximized())
         self.settings.sync()
         self.session_store.save(self.sessions)
+        for window in self.detached_windows.values():
+            window.hide()
         event.accept()
 
 

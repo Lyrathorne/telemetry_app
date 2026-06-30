@@ -91,6 +91,23 @@ class AppSettings:
     def load_state(self):
         return self._settings.value("window/state")
 
+    def save_dashboard_layout(self, layout: dict) -> None:
+        self._settings.setValue("layout/dashboard", json.dumps(layout))
+
+    def load_dashboard_layout(self) -> dict | None:
+        raw = self._settings.value("layout/dashboard", "", str)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def clear_legacy_window_layout(self) -> None:
+        self._settings.remove("window/state")
+        self._settings.remove("window/geometry")
+
     def graph_panels_state(self) -> list[dict]:
         raw = self._settings.value("graphs/panels", "[]", str)
         try:

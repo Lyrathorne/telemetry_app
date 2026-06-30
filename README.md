@@ -36,6 +36,12 @@ Run diagnostics:
 python main.py --diagnostics
 ```
 
+Reset only the saved dashboard layout:
+
+```bat
+python main.py --reset-layout
+```
+
 ## Fullscreen And Shortcuts
 
 - `F11` toggles fullscreen.
@@ -97,7 +103,7 @@ Imported session metadata and saved settings are stored under the same `%LOCALAP
 
 ## Dashboard Panels And Layouts
 
-The dashboard uses movable Qt dock panels:
+The dashboard uses movable Qt dock panels with one registered owner per panel ID:
 
 - `Live Telemetry`
 - `Live Graphs`
@@ -107,19 +113,40 @@ The dashboard uses movable Qt dock panels:
 - `Comparison Graphs`
 - `Laps`
 
-Use the `View` menu to hide or restore panels. Panels can be docked, floated, resized, and moved around the window. The current geometry and dock arrangement are saved automatically when the app closes and restored on the next start when layout restoration is enabled.
+Use the `View` menu to hide or restore panels. Panels can be docked, detached into managed top-level windows, resized, and moved around the window. The current geometry and dock arrangement are saved automatically when the app closes and restored on the next start when layout restoration is enabled.
 
-Every panel has a context menu with recovery actions such as detach, dock back, hide, maximize/restore detached panel windows, and reset panel size. The explicit `Detach` action moves the original panel widget into a normal top-level Qt window, so graph/session data is not duplicated or reset. Use `View > Recover all panels` if a panel is hidden or moved off-screen.
+Every panel has a context menu with recovery actions such as detach, dock back, hide, maximize/restore detached panel windows, and reset panel size. The explicit `Detach` action moves the original panel widget into a normal top-level Qt window, so graph/session data is not duplicated or reset. Native Qt floating docks are intentionally disabled; detached windows are managed by Racing Telemetry so stale floating windows cannot block input on startup.
+
+Layouts are saved with a versioned application-level schema around the Qt dock state. If an old or invalid layout contains duplicate panel IDs, stale panel types, impossible geometry, or native floating dock state, the app logs the problem, discards only the layout state, and loads the default dashboard. `--reset-layout` skips saved geometry, dock state, and detached-window restoration while preserving telemetry data and the SQLite lap database.
 
 The `Layouts` menu includes:
 
-- `Default`
-- `Live Driving`
-- `Telemetry Analysis`
+- `Live driving`
+- `Timing`
+- `Analysis`
+- `Diagnostics`
+- `Restore default`
 - `Save layout as...`
 - `Load layout...`
 
 `Reset layout` restores a sensible default arrangement.
+
+## Predefined Telemetry Panel Templates
+
+Use `View > Add telemetry panel`, the toolbar's `Add telemetry panel` button, or right-click the dashboard controls to create ready-made panels. Current templates:
+
+- Pedals graph: throttle and brake on a fixed physical `0-100%` range.
+- Speed and RPM graph: stacked speed and RPM graphs with separate Y scales.
+- Live telemetry values: compact values with `--` or `Unavailable` for missing metrics.
+- Live lap timing: current lap row with status text.
+- Sector timing: compact S1/S2/S3 status table.
+- Lap history: saved laps from `%LOCALAPPDATA%\RacingTelemetry\data\racing_telemetry.sqlite3`.
+- Best laps: valid completed laps ranked by lap time.
+- Lap comparison: launcher panel that reuses the existing saved-lap comparison workflow.
+- Time delta graph: prepared reference-relative delta graph surface.
+- Source status and connection diagnostics: singleton built-in panels.
+
+Dynamic templates such as graph panels can have multiple instances and receive unique IDs like `pedals_graph_1` and `pedals_graph_2`. Singleton templates focus the existing panel instead of creating a duplicate.
 
 ## Live Graphs
 
