@@ -9,12 +9,18 @@ from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal
 
-from models import LapResult, SectorResult, TelemetrySample
+from models import LapResult, LapTelemetrySeries, SectorResult, TelemetrySample
 from telemetry.lap_storage import LapStorage
 
 
 MIN_REASONABLE_LAP_MS = 10_000
 SECTOR_SUM_TOLERANCE_MS = 250
+TIMING_STATUS_PURPLE = "PURPLE"
+TIMING_STATUS_GREEN = "GREEN"
+TIMING_STATUS_YELLOW = "YELLOW"
+TIMING_STATUS_NEUTRAL = "NEUTRAL"
+TIMING_STATUS_INVALID = "INVALID"
+TIMING_STATUS_UNAVAILABLE = "UNAVAILABLE"
 
 
 class TimingState(str, Enum):
@@ -50,9 +56,10 @@ class StorageStatus:
 
 
 class InMemoryLapRepository:
-    def __init__(self) -> None:
+    def __init__(self, max_full_telemetry_laps: int = 20) -> None:
         self._laps: list[LapResult] = []
         self._reference_lap_id: str | None = None
+        self.max_full_telemetry_laps = max(1, max_full_telemetry_laps)
 
     def clear(self) -> None:
         self._laps.clear()
@@ -62,6 +69,7 @@ class InMemoryLapRepository:
         if any(existing.id == lap.id for existing in self._laps):
             return
         self._laps.insert(0, lap)
+        self._evict_old_graphs()
 
     def get_session_laps(self, session_id: str) -> list[LapResult]:
         return [lap for lap in self._laps if lap.session_id == session_id]
@@ -77,6 +85,67 @@ class InMemoryLapRepository:
     @property
     def laps(self) -> list[LapResult]:
         return self._laps
+
+    def completed_graphs(self) -> list[LapTelemetrySeries]:
+        return [lap.telemetry_series for lap in self._laps if lap.telemetry_series is not None]
+
+    def _evict_old_graphs(self) -> None:
+        graphs = [lap for lap in self._laps if lap.telemetry_series is not None]
+        for lap in graphs[self.max_full_telemetry_laps:]:
+            lap.telemetry_series = None
+
+
+class LapGraphBuffer:
+    def __init__(self, lap_id: str, lap_number: int, fully_observed: bool, valid: bool) -> None:
+        self.lap_id = lap_id
+        self.lap_number = lap_number
+        self.fully_observed = fully_observed
+        self.valid = valid
+        self._start_time: float | None = None
+        self._samples: list[TelemetrySample] = []
+        self.last_reset_reason = "Lap buffer created"
+
+    @property
+    def sample_count(self) -> int:
+        return len(self._samples)
+
+    @property
+    def start_time(self) -> float | None:
+        return self._start_time
+
+    def add_sample(self, sample: TelemetrySample) -> None:
+        if self._start_time is None:
+            self._start_time = sample.timestamp
+        self._samples.append(sample)
+
+    def freeze(self, lap_time_ms: int | None, sector_boundary_times_ms: list[int]) -> LapTelemetrySeries:
+        start_time = self._start_time
+        elapsed: list[float] = []
+        for sample in self._samples:
+            if sample.current_lap_time_ms is not None:
+                elapsed.append(max(0.0, sample.current_lap_time_ms / 1000.0))
+            elif start_time is not None:
+                elapsed.append(max(0.0, float(sample.timestamp) - float(start_time)))
+            else:
+                elapsed.append(0.0)
+        return LapTelemetrySeries(
+            lap_id=self.lap_id,
+            lap_number=self.lap_number,
+            lap_time_ms=lap_time_ms,
+            fully_observed=self.fully_observed,
+            valid=self.valid,
+            elapsed_time_s=elapsed,
+            lap_distance_m=[sample.lap_distance for sample in self._samples],
+            normalized_position=[sample.normalized_track_position for sample in self._samples],
+            speed_kmh=[sample.speed_kmh for sample in self._samples],
+            rpm=[sample.rpm for sample in self._samples],
+            gear=[sample.gear for sample in self._samples],
+            throttle_percent=[sample.throttle_percent for sample in self._samples],
+            brake_percent=[sample.brake_percent for sample in self._samples],
+            clutch_percent=[sample.clutch_percent for sample in self._samples],
+            steering=[sample.steering for sample in self._samples],
+            sector_boundary_elapsed_s=[boundary / 1000.0 for boundary in sector_boundary_times_ms],
+        )
 
 
 class LapTracker(QObject):
@@ -97,6 +166,7 @@ class LapTracker(QObject):
         self.repository = repository or InMemoryLapRepository()
         self.session_id = uuid4().hex
         self.active_lap: LapResult | None = None
+        self.current_lap_graph: LapGraphBuffer | None = None
         self.completed_laps = self.repository.laps
         self.reference = TimingReference()
         self.timing_state = TimingState.DISCONNECTED
@@ -114,12 +184,15 @@ class LapTracker(QObject):
         self._partial_start_sector_index: int | None = None
         self._completed_lap_keys: set[tuple[str, int | str]] = set()
         self._metadata_updated = False
+        self._last_frozen_lap_graph_id = ""
+        self._last_graph_reset_reason = "No graph reset"
         self._logger = logging.getLogger(__name__)
 
     def start_session(self, game: str, track: str | None, car: str | None, driver_name: str | None = None) -> None:
         self.session_id = uuid4().hex
         self.repository.clear()
         self.active_lap = None
+        self.current_lap_graph = None
         self._last_completed_laps = None
         self._last_position = None
         self._last_sector_index = None
@@ -131,6 +204,8 @@ class LapTracker(QObject):
         self._partial_start_sector_index = None
         self._completed_lap_keys.clear()
         self._metadata_updated = False
+        self._last_frozen_lap_graph_id = ""
+        self._last_graph_reset_reason = "Session started"
         self.storage_status = StorageStatus(database_path=str(self.storage.path))
         try:
             self.storage.ensure_session(
@@ -172,6 +247,8 @@ class LapTracker(QObject):
 
         assert self.active_lap is not None
         self.active_lap.samples.append(sample)
+        if self.current_lap_graph is not None:
+            self.current_lap_graph.add_sample(sample)
         if sample.invalid_lap is True or sample.lap_valid is False:
             self.active_lap.valid = False
 
@@ -191,8 +268,8 @@ class LapTracker(QObject):
                 return None
             lap = self._complete_active_lap(sample)
             if lap is not None:
-                self.lap_completed.emit(lap)
                 self._start_lap(sample, incomplete_first=False)
+                self.lap_completed.emit(lap)
                 self._remember_sample_state(sample)
                 self._emit_diagnostics()
                 return lap
@@ -238,6 +315,13 @@ class LapTracker(QObject):
             started_at=datetime.now().isoformat(timespec="milliseconds"),
             notes="Started mid-lap" if partial_first else "",
         )
+        self.current_lap_graph = LapGraphBuffer(
+            lap_id=self.active_lap.id,
+            lap_number=self.active_lap.lap_number,
+            fully_observed=self.active_lap.fully_observed,
+            valid=self.active_lap.valid,
+        )
+        self._last_graph_reset_reason = "Confirmed lap completion" if not incomplete_first else "First lap buffer started"
         self._last_sector_index = sample.current_sector_index
         self._last_sector_start_ms = sample.current_lap_time_ms
         self._completed_sector_total_ms = 0
@@ -310,8 +394,9 @@ class LapTracker(QObject):
         lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
         self._finalize_open_sector(lap, sample)
         self._validate_completed_sector_timing(lap)
-        self._apply_timing_colors(lap)
+        self._freeze_lap_graph(lap)
         self.repository.add_completed_lap(lap)
+        self._recalculate_sector_timing_statuses(lap)
         self.last_event = f"Lap completed: lap={lap.lap_number} time_ms={lap.lap_time_ms}"
         self._set_timing_state(TimingState.LAP_COMPLETED, self.last_event)
         self._save_lap(lap)
@@ -323,6 +408,7 @@ class LapTracker(QObject):
         self.active_lap.complete = False
         self.active_lap.valid = False
         self.active_lap.fully_observed = False
+        self._freeze_lap_graph(self.active_lap)
         self.active_lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
         self.active_lap.notes = append_note(self.active_lap.notes, "First finish after connection; not saved as complete")
         self.last_event = "Partial lap discarded at first confirmed finish"
@@ -362,8 +448,10 @@ class LapTracker(QObject):
         sector_time, source = self._sector_time_from_sample(sector_index, sample, lap_time_ms)
         if sector_time is not None:
             self._completed_sector_total_ms += sector_time
-        if source == "acc_cumulative_split" and sample.current_split_time_ms is not None and sector_index in (0, 1):
-            self._cumulative_splits_ms[sector_index + 1] = int(sample.current_split_time_ms)
+        if source in {"acc_cumulative_split", "acc_sector_transition_snapshot"} and sector_index in (0, 1):
+            boundary_lap_time_ms = sample.current_split_time_ms or sample.current_lap_time_ms
+            if boundary_lap_time_ms is not None:
+                self._cumulative_splits_ms[sector_index + 1] = int(boundary_lap_time_ms)
         target_lap.sectors.append(
             SectorResult(
                 sector_number=sector_number,
@@ -384,11 +472,12 @@ class LapTracker(QObject):
         if self._partial_start_sector_index == sector_index:
             return None, "partial_lap_unavailable"
         if sector_index in (0, 1):
-            cumulative_split_ms = sample.current_split_time_ms
-            if cumulative_split_ms is not None:
-                previous_cumulative_ms = self._cumulative_splits_ms.get(sector_index, 0)
-                if cumulative_split_ms > previous_cumulative_ms:
-                    return cumulative_split_ms - previous_cumulative_ms, "acc_cumulative_split"
+            boundary_lap_time_ms = sample.current_split_time_ms or sample.current_lap_time_ms
+            if boundary_lap_time_ms is not None:
+                previous_boundary_ms = self._cumulative_splits_ms.get(sector_index, 0)
+                if boundary_lap_time_ms > previous_boundary_ms:
+                    source = "acc_cumulative_split" if sample.current_split_time_ms is not None else "acc_sector_transition_snapshot"
+                    return boundary_lap_time_ms - previous_boundary_ms, source
         if sector_index == 2:
             final_lap_time = sample.last_lap_time_ms or lap_time_ms
             cumulative_split_2_ms = self._cumulative_splits_ms.get(2)
@@ -399,10 +488,6 @@ class LapTracker(QObject):
         if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
             if lap_time_ms is None or self._completed_sector_total_ms + sample.last_sector_time_ms <= lap_time_ms + SECTOR_SUM_TOLERANCE_MS:
                 return sample.last_sector_time_ms, "acc_direct_sector"
-        start_ms = self._last_sector_start_ms
-        current_ms = sample.current_lap_time_ms
-        if start_ms is not None and current_ms is not None and current_ms >= start_ms:
-            return current_ms - start_ms, "sector_transition_derived"
         return None, "unavailable"
 
     def _validate_completed_sector_timing(self, lap: LapResult) -> None:
@@ -434,31 +519,59 @@ class LapTracker(QObject):
         for sector in first_three:
             sector.time_ms = None
             sector.valid = False
-            sector.comparison_status = "neutral"
+            sector.comparison_status = TIMING_STATUS_UNAVAILABLE
             sector.timing_source = "unavailable"
 
-    def _apply_timing_colors(self, lap: LapResult) -> None:
-        if not lap.valid or lap.lap_time_ms is None:
-            for sector in lap.sectors:
-                sector.comparison_status = "neutral"
+    def _freeze_lap_graph(self, lap: LapResult) -> None:
+        if self.current_lap_graph is None:
             return
-
-        valid_laps = [
-            other for other in self.completed_laps
-            if other.valid and other.lap_time_ms is not None and same_scope(other, lap)
+        boundaries = [
+            self._cumulative_splits_ms[index]
+            for index in (1, 2)
+            if index in self._cumulative_splits_ms
         ]
-        best_time = min([other.lap_time_ms for other in valid_laps], default=None)
-        if best_time is None:
-            status = "neutral"
-        elif lap.lap_time_ms < best_time:
-            status = "purple"
-        elif lap.lap_time_ms < personal_best_time(valid_laps, lap):
-            status = "green"
-        else:
-            status = "yellow"
+        lap.telemetry_series = self.current_lap_graph.freeze(lap.lap_time_ms, boundaries)
+        self._last_frozen_lap_graph_id = lap.id
 
-        for sector in lap.sectors:
-            sector.comparison_status = status if sector.valid else "neutral"
+    def _recalculate_sector_timing_statuses(self, changed_lap: LapResult) -> None:
+        compatible_laps = [lap for lap in self.completed_laps if same_scope(lap, changed_lap)]
+        for lap in compatible_laps:
+            for sector in lap.sectors:
+                if not lap.valid or not sector.valid:
+                    sector.comparison_status = TIMING_STATUS_INVALID
+                elif sector.time_ms is None:
+                    sector.comparison_status = TIMING_STATUS_UNAVAILABLE
+                else:
+                    sector.comparison_status = TIMING_STATUS_NEUTRAL
+
+        for sector_number in (1, 2, 3):
+            valid_sectors = [
+                (lap, sector)
+                for lap in compatible_laps
+                for sector in lap.sectors
+                if sector.sector_number == sector_number
+                and lap.valid
+                and sector.valid
+                and sector.time_ms is not None
+            ]
+            if not valid_sectors:
+                continue
+            fastest_time_ms = min(int(sector.time_ms) for _lap, sector in valid_sectors if sector.time_ms is not None)
+            previous_best_ms: int | None = None
+            for lap, sector in sorted(valid_sectors, key=lambda pair: pair[0].started_at):
+                assert sector.time_ms is not None
+                current_time_ms = int(sector.time_ms)
+                if current_time_ms == fastest_time_ms:
+                    sector.comparison_status = TIMING_STATUS_PURPLE
+                elif previous_best_ms is not None and current_time_ms < previous_best_ms:
+                    sector.comparison_status = TIMING_STATUS_GREEN
+                elif previous_best_ms is not None and current_time_ms > previous_best_ms:
+                    sector.comparison_status = TIMING_STATUS_YELLOW
+                elif len(valid_sectors) > 1:
+                    sector.comparison_status = TIMING_STATUS_YELLOW
+                else:
+                    sector.comparison_status = TIMING_STATUS_NEUTRAL
+                previous_best_ms = current_time_ms if previous_best_ms is None else min(previous_best_ms, current_time_ms)
 
     def _save_lap(self, lap: LapResult) -> None:
         try:
@@ -532,6 +645,7 @@ class LapTracker(QObject):
 
     def _reset_active_lap(self, reason: str) -> None:
         self.active_lap = None
+        self.current_lap_graph = None
         self._last_sector_index = None
         self._last_sector_start_ms = None
         self._completed_sector_total_ms = 0
@@ -569,6 +683,12 @@ class LapTracker(QObject):
                 "last_save_error": self.storage_status.last_save_error,
                 "pending_storage_operations": self.storage_status.pending_operations,
                 "last_timing_event": self.last_event,
+                "current_lap_graph_samples": self.current_lap_graph.sample_count if self.current_lap_graph else 0,
+                "current_lap_graph_start_time": self.current_lap_graph.start_time if self.current_lap_graph else "",
+                "last_frozen_lap_graph_id": self._last_frozen_lap_graph_id,
+                "completed_graphs_in_memory": len(self.repository.completed_graphs()),
+                "lap_graph_memory_limit": self.repository.max_full_telemetry_laps,
+                "last_graph_reset_reason": self._last_graph_reset_reason,
             }
         )
 

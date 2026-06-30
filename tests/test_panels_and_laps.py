@@ -200,6 +200,71 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual(sector_times, [67420, 47742, 30858])
             self.assertEqual(sum(sector_times), 146020)
 
+    def test_sector_boundaries_do_not_use_packet_delta_or_next_lap_reset_timer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.000, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(40.200, 40200, 0.31, 0, 0))
+            tracker.process_sample(lap_sample(40.220, 40220, 0.32, 0, 1))
+            tracker.process_sample(lap_sample(83.520, 83520, 0.65, 0, 1))
+            tracker.process_sample(lap_sample(83.540, 83540, 0.66, 0, 2))
+            finish = lap_sample(125.012, 2, 0.01, 1, 0)
+            finish.last_lap_time_ms = 125012
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            sector_times = [sector.time_ms for sector in completed.sectors[:3]]
+            self.assertEqual(sector_times, [40220, 43320, 41472])
+            self.assertNotIn(20, sector_times)
+            self.assertNotIn(2, sector_times)
+            self.assertEqual(sum(sector_times), 125012)
+            self.assertEqual(completed.telemetry_series.sample_count, 6)
+            self.assertEqual(completed.telemetry_series.sector_boundary_elapsed_s, [40.22, 83.54])
+
+    def test_current_lap_graph_resets_after_confirmed_completion_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(40.0, 40000, 0.3, 0, 1))
+            self.assertEqual(tracker.current_lap_graph.sample_count, 2)
+            finish = lap_sample(100.0, 2, 0.01, 1, 0)
+            finish.last_lap_time_ms = 100000
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed.telemetry_series)
+            self.assertEqual(completed.telemetry_series.sample_count, 3)
+            self.assertEqual(tracker.current_lap_graph.sample_count, 0)
+            tracker.process_sample(lap_sample(100.1, 100, 0.01, 1, 0))
+            self.assertEqual(tracker.current_lap_graph.sample_count, 1)
+
+    def test_sector_statuses_recalculate_when_new_purple_appears(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            for sample in [
+                lap_sample(0.0, 0, 0.0, 0, 0),
+                lap_sample(40.0, 40000, 0.3, 0, 1),
+                lap_sample(80.0, 80000, 0.6, 0, 2),
+            ]:
+                tracker.process_sample(sample)
+            finish_1 = lap_sample(120.0, 2, 0.01, 1, 0)
+            finish_1.last_lap_time_ms = 120000
+            lap_1 = tracker.process_sample(finish_1)
+            tracker.process_sample(lap_sample(120.1, 100, 0.01, 1, 0))
+            tracker.process_sample(lap_sample(158.0, 38000, 0.3, 1, 1))
+            tracker.process_sample(lap_sample(196.0, 76000, 0.6, 1, 2))
+            finish_2 = lap_sample(234.0, 2, 0.01, 2, 0)
+            finish_2.last_lap_time_ms = 114000
+            lap_2 = tracker.process_sample(finish_2)
+
+            self.assertEqual(lap_2.sectors[0].comparison_status, "PURPLE")
+            self.assertEqual(lap_1.sectors[0].comparison_status, "YELLOW")
+            self.assertEqual(lap_2.sectors[1].comparison_status, "PURPLE")
+            self.assertEqual(lap_2.sectors[2].comparison_status, "PURPLE")
+
     def test_invalid_cumulative_sector_order_keeps_lap_but_rejects_sectors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
@@ -327,6 +392,34 @@ class PanelAndLapTests(unittest.TestCase):
         self.assertEqual(len(window.sector_timing_tables), initial_tables)
         self.assertIsNotNone(window.lap_tracker.active_lap)
         self.assertEqual(window.lap_tracker.timing_state, TimingState.TRACKING_LAP)
+        window.close()
+
+    def test_current_lap_graph_panel_is_separate_from_continuous_graphs(self) -> None:
+        window = MainWindow(reset_layout=True)
+        continuous_count = len(window.graph_panels)
+        panel_id = window.create_panel_from_template("current_lap_graph")
+        self.assertIsNotNone(panel_id)
+        self.assertEqual(len(window.graph_panels), continuous_count)
+        self.assertEqual(len(window.current_lap_graph_panels), 1)
+        lap = make_lap_with_sectors([10000], complete=False)
+        lap.samples = [lap_sample(0.0, 0, 0.0, 0, 0), lap_sample(1.0, 1000, 0.01, 0, 0)]
+        window.handle_lap_updated(lap)
+        self.assertEqual(window.current_lap_graph_panels[0].raw_sample_count(), 2)
+        window.close()
+
+    def test_saved_lap_graph_opens_from_in_memory_completed_lap(self) -> None:
+        window = MainWindow(reset_layout=True)
+        lap = make_lap_with_sectors([40220, 43320, 41472], complete=True)
+        lap.samples = [
+            lap_sample(0.0, 0, 0.0, 0, 0),
+            lap_sample(40.22, 40220, 0.32, 0, 1),
+            lap_sample(83.54, 83540, 0.66, 0, 2),
+        ]
+        panel = window.open_lap_graph(lap)
+        self.assertIsNotNone(panel)
+        self.assertEqual(panel.raw_sample_count(), 3)
+        window.handle_telemetry_sample(lap_sample(200.0, 2000, 0.02, 1, 0))
+        self.assertEqual(panel.raw_sample_count(), 3)
         window.close()
 
     def test_live_lap_table_updates_sector_cells(self) -> None:

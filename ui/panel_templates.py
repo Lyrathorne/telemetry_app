@@ -52,6 +52,19 @@ PANEL_TEMPLATES: dict[str, PanelTemplate] = {
             "settings_hidden": True,
         },
     ),
+    "current_lap_graph": PanelTemplate(
+        "current_lap_graph",
+        "Current lap telemetry",
+        "current_lap_graph",
+        "Throttle and brake graph for the active lap; resets only after confirmed lap completion.",
+        default_config={
+            "metrics": ["throttle_percent", "brake_percent"],
+            "x_mode": "full_session",
+            "y_mode": "metric_default",
+            "manual_y": [0.0, 100.0],
+            "settings_hidden": True,
+        },
+    ),
     "speed_rpm_graph": PanelTemplate(
         "speed_rpm_graph",
         "Speed and RPM graph",
@@ -128,7 +141,7 @@ PANEL_TEMPLATES: dict[str, PanelTemplate] = {
 
 
 TEMPLATE_GROUPS: dict[str, list[str]] = {
-    "Live driving": ["pedals_graph", "speed_rpm_graph", "live_values"],
+    "Live driving": ["pedals_graph", "speed_rpm_graph", "current_lap_graph", "live_values"],
     "Timing": ["live_lap_timing", "sector_timing", "lap_history", "best_laps"],
     "Analysis": ["lap_comparison", "time_delta_graph"],
     "Diagnostics": ["source_status", "connection_diagnostics"],
@@ -136,7 +149,7 @@ TEMPLATE_GROUPS: dict[str, list[str]] = {
 
 
 BUILTIN_LAYOUTS: dict[str, list[str]] = {
-    "Live driving": ["pedals_graph", "speed_rpm_graph", "live_values", "sector_timing"],
+    "Live driving": ["pedals_graph", "speed_rpm_graph", "current_lap_graph", "live_values", "sector_timing"],
     "Timing": ["live_lap_timing", "sector_timing", "lap_history", "live_values"],
     "Analysis": ["lap_history", "lap_comparison", "time_delta_graph"],
     "Diagnostics": ["source_status", "connection_diagnostics"],

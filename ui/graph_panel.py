@@ -422,6 +422,14 @@ class GraphPanel(QWidget):
     def raw_sample_count(self) -> int:
         return len(self.samples)
 
+    def replace_samples(self, samples: list[TelemetrySample]) -> None:
+        self.samples = list(samples)
+        self._received_monotonic = [time.monotonic()] * len(self.samples)
+        self.first_x_value = None
+        self.latest_displayed_x = None
+        self.latest_sample_x = None
+        self.refresh_plot()
+
     def visible_sample_count(self) -> int:
         return self.diagnostics.visible_samples
 

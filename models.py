@@ -93,6 +93,30 @@ class SectorResult:
 
 
 @dataclass(slots=True)
+class LapTelemetrySeries:
+    lap_id: str = ""
+    lap_number: int = 0
+    lap_time_ms: int | None = None
+    fully_observed: bool = True
+    valid: bool = True
+    elapsed_time_s: list[float] = field(default_factory=list)
+    lap_distance_m: list[float | None] = field(default_factory=list)
+    normalized_position: list[float | None] = field(default_factory=list)
+    speed_kmh: list[float | None] = field(default_factory=list)
+    rpm: list[float | None] = field(default_factory=list)
+    gear: list[int | None] = field(default_factory=list)
+    throttle_percent: list[float | None] = field(default_factory=list)
+    brake_percent: list[float | None] = field(default_factory=list)
+    clutch_percent: list[float | None] = field(default_factory=list)
+    steering: list[float | None] = field(default_factory=list)
+    sector_boundary_elapsed_s: list[float] = field(default_factory=list)
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.elapsed_time_s)
+
+
+@dataclass(slots=True)
 class LapResult:
     id: str = field(default_factory=lambda: uuid4().hex)
     lap_number: int = 0
@@ -106,6 +130,7 @@ class LapResult:
     session_id: str = ""
     sectors: list[SectorResult] = field(default_factory=list)
     samples: list[TelemetrySample] = field(default_factory=list)
+    telemetry_series: LapTelemetrySeries | None = None
     fully_observed: bool = True
     raw_samples_recorded: bool = False
     started_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))

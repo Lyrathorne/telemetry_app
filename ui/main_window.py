@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent, QKeySequence
+from PySide6.QtGui import QAction, QBrush, QColor, QCloseEvent, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -89,6 +89,8 @@ class MainWindow(QMainWindow):
         self._layout_restore_count = 0
         self._reset_layout_requested = reset_layout
         self.graph_panels: list[GraphPanel] = []
+        self.current_lap_graph_panels: list[GraphPanel] = []
+        self.saved_lap_graph_panels: list[GraphPanel] = []
         self.live_value_panels: list[dict[str, QLabel]] = []
         self.live_lap_tables: list[QTableWidget] = []
         self.sector_timing_tables: list[QTableWidget] = []
@@ -186,6 +188,9 @@ class MainWindow(QMainWindow):
         self.stop_recording_action = QAction("Stop raw recording", self)
         self.stop_recording_action.triggered.connect(self.stop_recording)
 
+        self.open_lap_graph_action = QAction("Open selected lap graph", self)
+        self.open_lap_graph_action.triggered.connect(self.open_selected_lap_graph)
+
         self.settings_action = QAction("Application settings...", self)
         self.settings_action.triggered.connect(self.open_settings_dialog)
 
@@ -282,6 +287,8 @@ class MainWindow(QMainWindow):
         telemetry_menu.addSeparator()
         telemetry_menu.addAction(self.start_recording_action)
         telemetry_menu.addAction(self.stop_recording_action)
+        telemetry_menu.addSeparator()
+        telemetry_menu.addAction(self.open_lap_graph_action)
 
         settings_menu = self.menuBar().addMenu("Settings")
         settings_menu.addAction(self.settings_action)
@@ -527,6 +534,12 @@ class MainWindow(QMainWindow):
             "last_save_error": "Save error:",
             "pending_storage_operations": "Pending saves:",
             "last_timing_event": "Last timing event:",
+            "current_lap_graph_samples": "Current lap graph samples:",
+            "current_lap_graph_start_time": "Current lap graph start:",
+            "last_frozen_lap_graph_id": "Last frozen lap graph:",
+            "completed_graphs_in_memory": "Completed graphs in memory:",
+            "lap_graph_memory_limit": "Graph memory limit:",
+            "last_graph_reset_reason": "Graph reset reason:",
         }.items():
             label = QLabel("--")
             label.setWordWrap(True)
@@ -586,9 +599,9 @@ class MainWindow(QMainWindow):
         self.lap_labels["timing_scope"].setText("Purple: fastest among loaded/current-session valid laps")
         layout.addWidget(timing_group)
 
-        self.laps_table = QTableWidget(0, 9)
+        self.laps_table = QTableWidget(0, 10)
         self.laps_table.setHorizontalHeaderLabels(
-            ["Lap", "Lap time", "Sector 1", "Sector 2", "Sector 3", "Delta", "Valid", "Car", "Track"]
+            ["Lap", "Lap time", "Sector 1", "Sector 2", "Sector 3", "Delta", "Valid", "Car", "Track", "Graph"]
         )
         self.laps_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.laps_table.setSortingEnabled(True)
@@ -597,6 +610,7 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         for text, handler in (
             ("Compare selected laps", self.compare_selected_laps),
+            ("Open lap graph", self.open_selected_lap_graph),
             ("Delete selected lap", self.delete_selected_lap),
             ("Export selected lap", self.export_selected_lap),
         ):
@@ -719,6 +733,8 @@ class MainWindow(QMainWindow):
         panel_id = self._next_panel_id(prefix)
         if template.panel_type == "graph":
             widget = self._create_graph_panel_widget(template.title, template.default_config)
+        elif template.panel_type == "current_lap_graph":
+            widget = self._create_current_lap_graph_widget(template.title, template.default_config)
         else:
             widget = self._create_template_widget(template, panel_id)
         if widget is None:
@@ -748,6 +764,16 @@ class MainWindow(QMainWindow):
         if config:
             panel.restore_settings_state(config)
         self.graph_panels.append(panel)
+        return panel
+
+    def _create_current_lap_graph_widget(self, title: str, config: dict | None) -> GraphPanel:
+        panel = GraphPanel(title, self.settings.graph_refresh_ms(), self.settings.graph_history_limit(), self)
+        panel.setMinimumSize(120, 90)
+        if config:
+            panel.restore_settings_state(config)
+        if self.lap_tracker.active_lap is not None:
+            panel.replace_samples(self.lap_tracker.active_lap.samples)
+        self.current_lap_graph_panels.append(panel)
         return panel
 
     def _find_template_panel(self, template_id: str) -> str | None:
@@ -842,8 +868,8 @@ class MainWindow(QMainWindow):
         return table
 
     def _create_lap_history_template_widget(self) -> QWidget:
-        table = QTableWidget(len(self.saved_laps), 10, self)
-        table.setHorizontalHeaderLabels(["Date", "Session", "Driver", "Track", "Car", "Lap", "Lap time", "S1", "S2", "S3", "Valid"])
+        table = QTableWidget(len(self.saved_laps), 12, self)
+        table.setHorizontalHeaderLabels(["Date", "Session", "Driver", "Track", "Car", "Lap", "Lap time", "S1", "S2", "S3", "Valid", "Graph"])
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         for row, lap in enumerate(self.saved_laps):
             sectors = [format_time_ms(sector.time_ms) for sector in lap.sectors[:3]]
@@ -859,8 +885,9 @@ class MainWindow(QMainWindow):
                 format_time_ms(lap.lap_time_ms),
                 *sectors,
                 "Yes" if lap.valid else "No",
+                graph_availability(lap),
             ]
-            for column, value in enumerate(values[:10]):
+            for column, value in enumerate(values):
                 table.setItem(row, column, QTableWidgetItem(value))
         return table
 
@@ -1167,6 +1194,7 @@ class MainWindow(QMainWindow):
                 "Valid" if lap.valid else "Invalid",
                 lap.car or "--",
                 lap.track or "--",
+                graph_availability(lap),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -1190,6 +1218,7 @@ class MainWindow(QMainWindow):
             self.lap_labels["best_lap"].setText(format_time_ms(current_sample.best_lap_time_ms))
         self._update_live_lap_tables_from_lap(lap, complete=False)
         self._update_sector_tables_from_lap(lap)
+        self._update_current_lap_graph_panels(lap)
 
     def handle_lap_completed(self, lap: LapResult) -> None:
         self.saved_laps.insert(0, lap)
@@ -1198,6 +1227,12 @@ class MainWindow(QMainWindow):
         self.lap_labels["best_lap"].setText(format_time_ms(min(valid_times) if valid_times else None))
         self._update_live_lap_tables_from_lap(lap, complete=True)
         self._populate_laps_table()
+        self._update_current_lap_graph_panels(self.lap_tracker.active_lap)
+
+    def _update_current_lap_graph_panels(self, lap: LapResult | None) -> None:
+        samples = lap.samples if lap is not None else []
+        for panel in self.current_lap_graph_panels:
+            panel.replace_samples(samples)
 
     def _update_live_lap_tables_from_lap(self, lap: LapResult, complete: bool) -> None:
         sectors = {sector.sector_number: sector for sector in lap.sectors}
@@ -1216,9 +1251,13 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(row_values):
                 item = table.item(row, column)
                 if item is None:
-                    table.setItem(row, column, QTableWidgetItem(value))
+                    item = QTableWidgetItem(value)
+                    table.setItem(row, column, item)
                 elif item.text() != value:
                     item.setText(value)
+                if column in (2, 3, 4):
+                    sector = sectors.get(column - 1)
+                    self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
             if complete:
                 table.insertRow(table.rowCount())
 
@@ -1245,9 +1284,27 @@ class MainWindow(QMainWindow):
                 for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
                     item = table.item(row, column)
                     if item is None:
-                        table.setItem(row, column, QTableWidgetItem(value))
+                        item = QTableWidgetItem(value)
+                        table.setItem(row, column, item)
                     elif item.text() != value:
                         item.setText(value)
+                    if column in (1, 3):
+                        self._style_timing_item(item, status)
+
+    def _style_timing_item(self, item: QTableWidgetItem, status: str | None) -> None:
+        status_key = (status or "NEUTRAL").upper()
+        colors = {
+            "PURPLE": ("#6f2dbd", "#ffffff", "Fastest sector in current session"),
+            "GREEN": ("#1b7f3a", "#ffffff", "Faster than compatible personal reference"),
+            "YELLOW": ("#9f7a10", "#101010", "Slower than compatible personal reference"),
+            "NEUTRAL": ("#2f3542", "#f1f2f6", "No compatible reference"),
+            "INVALID": ("#4b4b4b", "#d0d0d0", "Invalid sector"),
+            "UNAVAILABLE": ("#20242b", "#b8bec8", "Sector timing unavailable"),
+        }
+        background, foreground, tooltip = colors.get(status_key, colors["NEUTRAL"])
+        item.setBackground(QBrush(QColor(background)))
+        item.setForeground(QBrush(QColor(foreground)))
+        item.setToolTip(tooltip)
 
     def selected_lap_rows(self) -> list[int]:
         if not hasattr(self, "laps_table"):
@@ -1257,6 +1314,35 @@ class MainWindow(QMainWindow):
     def selected_laps(self) -> list[LapResult]:
         rows = self.selected_lap_rows()
         return [self.saved_laps[row] for row in rows if 0 <= row < len(self.saved_laps)]
+
+    def open_selected_lap_graph(self) -> None:
+        laps = self.selected_laps()
+        if not laps:
+            self._show_error("Lap graph unavailable", "Select a lap in Lap history first.")
+            return
+        panel = self.open_lap_graph(laps[0])
+        if panel is None:
+            self._show_error("Lap graph unavailable", "This lap has summary data only; no in-memory telemetry graph is available.")
+
+    def open_lap_graph(self, lap: LapResult) -> GraphPanel | None:
+        if not lap.samples and lap.telemetry_series is None:
+            return None
+        title = f"Lap {lap.lap_number} graph"
+        panel = GraphPanel(title, self.settings.graph_refresh_ms(), self.settings.graph_history_limit(), self)
+        panel.restore_settings_state(
+            {
+                "metrics": ["speed_kmh", "throttle_percent", "brake_percent"],
+                "x_mode": "full_session",
+                "y_mode": "metric_default",
+                "settings_hidden": True,
+            }
+        )
+        panel.replace_samples(lap.samples)
+        self.saved_lap_graph_panels.append(panel)
+        panel_id = self._next_panel_id("saved_lap_graph")
+        template = PanelTemplate(panel_id, title, "saved_lap_graph", "Frozen completed lap graph.")
+        self._register_workspace_panel(panel_id, template, panel)
+        return panel
 
     def compare_selected_laps(self) -> None:
         laps = self.selected_laps()
@@ -1615,6 +1701,8 @@ class MainWindow(QMainWindow):
                 continue
             if template.panel_type == "graph":
                 widget = self._create_graph_panel_widget(item.get("title") or template.title, item.get("config") or template.default_config)
+            elif template.panel_type == "current_lap_graph":
+                widget = self._create_current_lap_graph_widget(item.get("title") or template.title, item.get("config") or template.default_config)
             else:
                 widget = self._create_template_widget(template, panel_id)
             if widget is not None:
@@ -1744,6 +1832,10 @@ class MainWindow(QMainWindow):
         if widget is not None:
             if isinstance(widget, GraphPanel) and widget in self.graph_panels:
                 self.graph_panels.remove(widget)
+            if isinstance(widget, GraphPanel) and widget in self.current_lap_graph_panels:
+                self.current_lap_graph_panels.remove(widget)
+            if isinstance(widget, GraphPanel) and widget in self.saved_lap_graph_panels:
+                self.saved_lap_graph_panels.remove(widget)
             widget.deleteLater()
         self.panel_registry.remove(panel_id)
         self.panel_widgets.pop(panel_id, None)
@@ -1892,6 +1984,7 @@ class MainWindow(QMainWindow):
         self.stop_recording_action.setEnabled(self.is_recording)
         self.save_recorded_action.setEnabled(bool(self.recording_samples))
         self.export_selected_action.setEnabled(has_selection)
+        self.open_lap_graph_action.setEnabled(bool(getattr(self, "laps_table", None) and self.selected_lap_rows()))
 
     def _refresh_live_diagnostics(self) -> None:
         if self.active_source is None:
@@ -1934,6 +2027,16 @@ class MainWindow(QMainWindow):
         for window in self.detached_windows.values():
             window.hide()
         event.accept()
+
+
+def graph_availability(lap: LapResult) -> str:
+    if lap.telemetry_series is not None:
+        return "Available in memory"
+    if lap.samples:
+        return "Raw samples"
+    if lap.complete:
+        return "Summary only"
+    return "Unavailable"
 
 
 class SettingsDialog(QDialog):
