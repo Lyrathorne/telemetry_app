@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from app.paths import data_dir, ensure_user_directories
-from models import LapResult, SectorResult, TelemetrySample
+from models import LapResult, SectorResult, SessionSummary, TelemetrySample
 
 
 SCHEMA_VERSION = 3
@@ -163,6 +163,14 @@ class LapStorage:
             )
             connection.commit()
 
+    def end_session(self, session_id: str, ended_at: str) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE telemetry_sessions SET ended_at = ? WHERE id = ?",
+                (ended_at, session_id),
+            )
+            connection.commit()
+
     def save_lap(self, lap: LapResult, include_samples: bool | None = None) -> None:
         save_samples = lap.raw_samples_recorded if include_samples is None else include_samples
         lap.raw_samples_recorded = bool(save_samples)
@@ -290,6 +298,48 @@ class LapStorage:
                     )
                 )
             return laps
+
+    def load_session_summaries(self) -> list[SessionSummary]:
+        try:
+            with closing(self.connect()) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        session.id,
+                        session.game,
+                        session.track,
+                        session.car,
+                        session.driver_name,
+                        session.source_type,
+                        session.started_at,
+                        session.ended_at,
+                        COUNT(laps.id) AS lap_count,
+                        MIN(CASE WHEN laps.complete = 1 AND laps.valid = 1 THEN laps.lap_time_ms END) AS best_lap_time_ms,
+                        SUM(CASE WHEN laps.complete = 1 AND laps.valid = 1 THEN 1 ELSE 0 END) AS valid_lap_count
+                    FROM telemetry_sessions AS session
+                    LEFT JOIN laps ON laps.session_id = session.id AND laps.complete = 1
+                    GROUP BY session.id
+                    ORDER BY session.started_at DESC
+                    """
+                ).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+        return [
+            SessionSummary(
+                session_id=row[0],
+                game=row[1] or "",
+                track=row[2],
+                car=row[3],
+                driver_name=row[4],
+                source_type=row[5] or "",
+                started_at=row[6] or "",
+                ended_at=row[7],
+                lap_count=int(row[8] or 0),
+                best_lap_time_ms=row[9],
+                valid_lap_count=int(row[10] or 0),
+            )
+            for row in rows
+        ]
 
     def delete_lap(self, lap_id: str) -> None:
         with closing(self.connect()) as connection:

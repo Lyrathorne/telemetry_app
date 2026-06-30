@@ -144,6 +144,21 @@ class LapResult:
         return self.lap_time_ms / 1000.0
 
 
+@dataclass(slots=True)
+class SessionSummary:
+    session_id: str
+    game: str = ""
+    track: str | None = None
+    car: str | None = None
+    driver_name: str | None = None
+    source_type: str = ""
+    started_at: str = ""
+    ended_at: str | None = None
+    lap_count: int = 0
+    best_lap_time_ms: int | None = None
+    valid_lap_count: int = 0
+
+
 def format_time_ms(time_ms: int | None) -> str:
     if time_ms is None or int(time_ms) < 0:
         return "\u2014"

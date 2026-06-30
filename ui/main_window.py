@@ -46,8 +46,10 @@ from models import METRICS, LapResult, TelemetrySample, TelemetrySession, format
 from telemetry import SOURCE_LABELS, SOURCE_TYPES
 from telemetry.base import SourceState
 from telemetry.comparison import build_comparison_series, preferred_axis, speed_delta
+from telemetry.display_names import display_car_name, display_track_name
 from telemetry.f1_2018 import F12018TelemetrySource
 from telemetry.importer import TelemetryImportError, import_telemetry_file
+from telemetry.lap_delta import completed_lap_delta_ms, format_delta_ms, live_lap_delta_ms
 from telemetry.lap_comparison import aligned_metric, assert_laps_comparable, common_position_grid, sector_marker_positions, time_delta
 from telemetry.lap_tracker import LapTracker
 from telemetry.session_store import SessionStore
@@ -94,6 +96,7 @@ class MainWindow(QMainWindow):
         self.live_value_panels: list[dict[str, QLabel]] = []
         self.live_lap_tables: list[QTableWidget] = []
         self.sector_timing_tables: list[QTableWidget] = []
+        self.session_history_tables: list[tuple[QTableWidget, QTableWidget]] = []
         self.graph_counter = 0
         self.recording_samples: list[TelemetrySample] = []
         self.is_recording = False
@@ -793,6 +796,8 @@ class MainWindow(QMainWindow):
             return self._create_sector_timing_widget()
         if template.panel_type == "lap_history":
             return self._create_lap_history_template_widget()
+        if template.panel_type == "session_history":
+            return self._create_session_history_widget()
         if template.panel_type == "best_laps":
             return self._create_best_laps_widget()
         if template.panel_type == "lap_comparison":
@@ -879,8 +884,8 @@ class MainWindow(QMainWindow):
                 lap.started_at,
                 lap.session_id,
                 lap.driver_name or "--",
-                lap.track or "--",
-                lap.car or "--",
+                display_track_name(lap.track),
+                display_car_name(lap.car),
                 str(lap.lap_number),
                 format_time_ms(lap.lap_time_ms),
                 *sectors,
@@ -901,10 +906,28 @@ class MainWindow(QMainWindow):
             while len(sectors) < 3:
                 sectors.append("--")
             delta = "--" if fastest is None or lap.lap_time_ms is None else f"+{(lap.lap_time_ms - fastest) / 1000.0:.3f}s"
-            values = [str(row + 1), lap.driver_name or "--", format_time_ms(lap.lap_time_ms), *sectors, lap.car or "--", delta]
+            values = [str(row + 1), lap.driver_name or "--", format_time_ms(lap.lap_time_ms), *sectors, display_car_name(lap.car), delta]
             for column, value in enumerate(values):
                 table.setItem(row, column, QTableWidgetItem(value))
         return table
+
+    def _create_session_history_widget(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        summary_table = QTableWidget(0, 6, self)
+        summary_table.setHorizontalHeaderLabels(["Track", "Car", "Game", "Date/time", "Best lap", "Laps"])
+        summary_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        detail_table = QTableWidget(0, 8, self)
+        detail_table.setHorizontalHeaderLabels(["Lap", "Lap time", "S1", "S2", "S3", "Delta", "Valid", "Notes"])
+        detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        detail_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        summary_table.itemSelectionChanged.connect(lambda: self._populate_session_detail_table(summary_table, detail_table))
+        layout.addWidget(summary_table)
+        layout.addWidget(detail_table)
+        self.session_history_tables.append((summary_table, detail_table))
+        self._populate_session_history_table(summary_table)
+        return widget
 
     def _create_lap_comparison_template_widget(self) -> QWidget:
         widget = QWidget(self)
@@ -972,6 +995,7 @@ class MainWindow(QMainWindow):
         self._logger.info("Stopping telemetry source: %s", source.display_name)
         source.stop()
         self.lap_tracker.stop_session()
+        self._populate_session_history_panels()
         self._detach_source(source)
         self.active_source = None
         self._status_timer.stop()
@@ -990,15 +1014,15 @@ class MainWindow(QMainWindow):
         self.telemetry_labels["Throttle"].setText(f"{sample.throttle_percent:.0f}%")
         self.telemetry_labels["Brake"].setText(f"{sample.brake_percent:.0f}%")
         self.common_labels["latest_update"].setText(time.strftime("%H:%M:%S", time.localtime(sample.timestamp or time.time())))
-        self.common_labels["car_name"].setText(sample.car_name or "--")
-        self.common_labels["track_name"].setText(sample.track_name or "--")
+        self.common_labels["car_name"].setText(display_car_name(sample.car_name))
+        self.common_labels["track_name"].setText(display_track_name(sample.track_name))
         self.common_labels["session_state"].setText(sample.session_state or "--")
         for panel in self.graph_panels:
             panel.add_sample(sample)
+        self.lap_tracker.process_sample(sample)
         self._update_live_value_template_panels(sample)
         self._update_live_lap_template_panels(sample)
         self._update_sector_template_panels(sample)
-        self.lap_tracker.process_sample(sample)
         if self.is_recording:
             self.recording_samples.append(sample)
             self.recording_count_label.setText(f"Samples: {len(self.recording_samples)}")
@@ -1017,7 +1041,7 @@ class MainWindow(QMainWindow):
             labels["lap_time"].setText(format_time_ms(sample.current_lap_time_ms))
             labels["last_lap"].setText(format_time_ms(sample.last_lap_time_ms))
             labels["best_lap"].setText(format_time_ms(sample.best_lap_time_ms))
-            labels["delta"].setText("Unavailable")
+            labels["delta"].setText(format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)))
 
     def _update_live_lap_template_panels(self, sample: TelemetrySample) -> None:
         for table in self.live_lap_tables:
@@ -1028,7 +1052,7 @@ class MainWindow(QMainWindow):
                 "--",
                 "--",
                 "--",
-                "Unavailable",
+                format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)),
                 "Invalid" if sample.invalid_lap else ("Pit" if sample.in_pit else "Current"),
             ]
             for column, value in enumerate(values):
@@ -1044,7 +1068,7 @@ class MainWindow(QMainWindow):
             for row in range(table.rowCount()):
                 status = "Current" if current == row else self.lap_tracker.waiting_reason
                 time_value = "Running" if current == row else "--"
-                for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
+                for column, value in enumerate([f"S{row + 1}", time_value, format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)), status]):
                     item = table.item(row, column)
                     if item is None:
                         table.setItem(row, column, QTableWidgetItem(value))
@@ -1070,9 +1094,9 @@ class MainWindow(QMainWindow):
             if key in self.shared_memory_labels:
                 self.shared_memory_labels[key].setText(text or "--")
             if key == "car_name":
-                self.common_labels["car_name"].setText(text or "--")
+                self.common_labels["car_name"].setText(display_car_name(text))
             if key == "track_name":
-                self.common_labels["track_name"].setText(text or "--")
+                self.common_labels["track_name"].setText(display_track_name(text))
             if key == "game_state":
                 self.common_labels["session_state"].setText(text or "--")
             if key == "updates_per_second":
@@ -1166,8 +1190,8 @@ class MainWindow(QMainWindow):
                 session.session_name,
                 session.driver_name,
                 session.game,
-                session.track,
-                session.car,
+                display_track_name(session.track),
+                display_car_name(session.car),
                 session.lap_label,
                 f"{session.duration:.1f}s",
                 str(session.sample_count),
@@ -1176,6 +1200,55 @@ class MainWindow(QMainWindow):
                 self.sessions_table.setItem(row, column, QTableWidgetItem(value))
         self.sessions_table.resizeColumnsToContents()
         self._update_actions()
+
+    def _populate_session_history_panels(self) -> None:
+        for summary_table, detail_table in self.session_history_tables:
+            self._populate_session_history_table(summary_table)
+            self._populate_session_detail_table(summary_table, detail_table)
+
+    def _populate_session_history_table(self, table: QTableWidget) -> None:
+        summaries = self.lap_tracker.storage.load_session_summaries()
+        table.setRowCount(len(summaries))
+        for row, summary in enumerate(summaries):
+            values = [
+                display_track_name(summary.track),
+                display_car_name(summary.car),
+                summary.game or "--",
+                summary.started_at or "--",
+                format_time_ms(summary.best_lap_time_ms),
+                str(summary.lap_count),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, summary.session_id)
+                table.setItem(row, column, item)
+        table.resizeColumnsToContents()
+
+    def _populate_session_detail_table(self, summary_table: QTableWidget, detail_table: QTableWidget) -> None:
+        selected_rows = sorted({index.row() for index in summary_table.selectedIndexes()})
+        session_id = None
+        if selected_rows:
+            item = summary_table.item(selected_rows[0], 0)
+            session_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        session_laps = [lap for lap in self.saved_laps if lap.session_id == session_id] if session_id else []
+        session_laps.sort(key=lambda lap: lap.lap_number)
+        detail_table.setRowCount(len(session_laps))
+        for row, lap in enumerate(session_laps):
+            sectors = {sector.sector_number: sector for sector in lap.sectors}
+            delta = format_delta_ms(completed_lap_delta_ms(lap, session_laps), best_label=True)
+            values = [
+                str(lap.lap_number),
+                format_time_ms(lap.lap_time_ms),
+                format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
+                format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
+                format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
+                delta,
+                "Valid" if lap.valid else "Invalid",
+                lap.notes or "--",
+            ]
+            for column, value in enumerate(values):
+                detail_table.setItem(row, column, QTableWidgetItem(value))
+        detail_table.resizeColumnsToContents()
 
     def _populate_laps_table(self) -> None:
         if not hasattr(self, "laps_table"):
@@ -1190,10 +1263,10 @@ class MainWindow(QMainWindow):
                 format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
                 format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
                 format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
-                "--",
+                format_delta_ms(completed_lap_delta_ms(lap, self.saved_laps), best_label=True),
                 "Valid" if lap.valid else "Invalid",
-                lap.car or "--",
-                lap.track or "--",
+                display_car_name(lap.car),
+                display_track_name(lap.track),
                 graph_availability(lap),
             ]
             for column, value in enumerate(values):
@@ -1226,7 +1299,9 @@ class MainWindow(QMainWindow):
         valid_times = [item.lap_time_ms for item in self.saved_laps if item.valid and item.lap_time_ms is not None]
         self.lap_labels["best_lap"].setText(format_time_ms(min(valid_times) if valid_times else None))
         self._update_live_lap_tables_from_lap(lap, complete=True)
+        self._refresh_completed_live_lap_rows()
         self._populate_laps_table()
+        self._populate_session_history_panels()
         self._update_current_lap_graph_panels(self.lap_tracker.active_lap)
 
     def _update_current_lap_graph_panels(self, lap: LapResult | None) -> None:
@@ -1243,7 +1318,10 @@ class MainWindow(QMainWindow):
             format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
             format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
             format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
-            "Unavailable",
+            format_delta_ms(
+                completed_lap_delta_ms(lap, self.saved_laps) if complete else live_lap_delta_ms(lap, self.saved_laps),
+                best_label=complete,
+            ),
             "Invalid" if not lap.valid else ("Complete" if complete else "Current"),
         ]
         for table in self.live_lap_tables:
@@ -1260,6 +1338,35 @@ class MainWindow(QMainWindow):
                     self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
             if complete:
                 table.insertRow(table.rowCount())
+
+    def _refresh_completed_live_lap_rows(self) -> None:
+        laps_by_number = {str(lap.lap_number): lap for lap in self.saved_laps}
+        for table in self.live_lap_tables:
+            for row in range(max(0, table.rowCount() - 1)):
+                lap_item = table.item(row, 0)
+                lap = laps_by_number.get(lap_item.text() if lap_item is not None else "")
+                if lap is None:
+                    continue
+                sectors = {sector.sector_number: sector for sector in lap.sectors}
+                values = [
+                    str(lap.lap_number),
+                    format_time_ms(lap.lap_time_ms),
+                    format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
+                    format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
+                    format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
+                    format_delta_ms(completed_lap_delta_ms(lap, self.saved_laps), best_label=True),
+                    "Invalid" if not lap.valid else "Complete",
+                ]
+                for column, value in enumerate(values):
+                    item = table.item(row, column)
+                    if item is None:
+                        item = QTableWidgetItem(value)
+                        table.setItem(row, column, item)
+                    else:
+                        item.setText(value)
+                    if column in (2, 3, 4):
+                        sector = sectors.get(column - 1)
+                        self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
 
     def _update_sector_tables_from_lap(self, lap: LapResult) -> None:
         sectors = {sector.sector_number: sector for sector in lap.sectors}
@@ -1281,7 +1388,8 @@ class MainWindow(QMainWindow):
                 else:
                     time_value = format_time_ms(None)
                     status = "Waiting"
-                for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
+                delta = format_delta_ms(live_lap_delta_ms(lap, self.saved_laps))
+                for column, value in enumerate([f"S{row + 1}", time_value, delta, status]):
                     item = table.item(row, column)
                     if item is None:
                         item = QTableWidgetItem(value)

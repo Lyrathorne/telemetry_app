@@ -69,6 +69,14 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
         self.assertEqual(list(window.panel_templates.values()).count("lap_history"), 1)
         window.close()
 
+    def test_session_history_template_is_available(self) -> None:
+        window = MainWindow(reset_layout=True)
+        panel_id = window.create_panel_from_template("session_history")
+        self.assertIsNotNone(panel_id)
+        self.assertEqual(list(window.panel_templates.values()).count("session_history"), 1)
+        self.assertTrue(window.session_history_tables)
+        window.close()
+
     def test_dynamic_templates_get_unique_ids(self) -> None:
         window = MainWindow(reset_layout=True)
         first = window.create_panel_from_template("pedals_graph")

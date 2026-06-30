@@ -12,16 +12,20 @@ from PySide6.QtCore import QObject, Signal
 
 from models import LapResult, LapTelemetrySeries, SectorResult, TelemetrySample
 from telemetry.lap_storage import LapStorage
+from telemetry.timing_status import (
+    TIMING_STATUS_GREEN,
+    TIMING_STATUS_INVALID,
+    TIMING_STATUS_NEUTRAL,
+    TIMING_STATUS_PURPLE,
+    TIMING_STATUS_UNAVAILABLE,
+    TIMING_STATUS_YELLOW,
+    recalculate_sector_statuses,
+    same_scope,
+)
 
 
 MIN_REASONABLE_LAP_MS = 10_000
 SECTOR_SUM_TOLERANCE_MS = 250
-TIMING_STATUS_PURPLE = "PURPLE"
-TIMING_STATUS_GREEN = "GREEN"
-TIMING_STATUS_YELLOW = "YELLOW"
-TIMING_STATUS_NEUTRAL = "NEUTRAL"
-TIMING_STATUS_INVALID = "INVALID"
-TIMING_STATUS_UNAVAILABLE = "UNAVAILABLE"
 
 
 class TimingState(str, Enum):
@@ -288,11 +292,17 @@ class LapTracker(QObject):
         return None
 
     def stop_session(self) -> None:
+        ended_at = datetime.now().isoformat(timespec="milliseconds")
         if self.active_lap is not None and self.active_lap.samples:
             self.active_lap.complete = False
-            self.active_lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
+            self.active_lap.completed_at = ended_at
             self._save_lap(self.active_lap)
             self.active_lap = None
+        try:
+            self.storage.end_session(self.session_id, ended_at)
+        except Exception as error:  # pragma: no cover - defensive storage boundary.
+            self.storage_status.last_save_error = str(error)
+            self.storage_error.emit(str(error))
         self._set_timing_state(TimingState.DISCONNECTED, "Waiting for telemetry source")
         self._emit_diagnostics()
 
@@ -590,44 +600,7 @@ class LapTracker(QObject):
         self._last_frozen_lap_graph_id = lap.id
 
     def _recalculate_sector_timing_statuses(self, changed_lap: LapResult) -> None:
-        compatible_laps = [lap for lap in self.completed_laps if same_scope(lap, changed_lap)]
-        for lap in compatible_laps:
-            for sector in lap.sectors:
-                if not lap.valid or not sector.valid:
-                    sector.comparison_status = TIMING_STATUS_INVALID
-                elif sector.time_ms is None:
-                    sector.comparison_status = TIMING_STATUS_UNAVAILABLE
-                else:
-                    sector.comparison_status = TIMING_STATUS_NEUTRAL
-
-        for sector_number in (1, 2, 3):
-            valid_sectors = [
-                (lap, sector)
-                for lap in compatible_laps
-                for sector in lap.sectors
-                if sector.sector_number == sector_number
-                and lap.valid
-                and sector.valid
-                and sector.time_ms is not None
-            ]
-            if not valid_sectors:
-                continue
-            fastest_time_ms = min(int(sector.time_ms) for _lap, sector in valid_sectors if sector.time_ms is not None)
-            previous_best_ms: int | None = None
-            for lap, sector in sorted(valid_sectors, key=lambda pair: pair[0].started_at):
-                assert sector.time_ms is not None
-                current_time_ms = int(sector.time_ms)
-                if current_time_ms == fastest_time_ms:
-                    sector.comparison_status = TIMING_STATUS_PURPLE
-                elif previous_best_ms is not None and current_time_ms < previous_best_ms:
-                    sector.comparison_status = TIMING_STATUS_GREEN
-                elif previous_best_ms is not None and current_time_ms > previous_best_ms:
-                    sector.comparison_status = TIMING_STATUS_YELLOW
-                elif len(valid_sectors) > 1:
-                    sector.comparison_status = TIMING_STATUS_YELLOW
-                else:
-                    sector.comparison_status = TIMING_STATUS_NEUTRAL
-                previous_best_ms = current_time_ms if previous_best_ms is None else min(previous_best_ms, current_time_ms)
+        recalculate_sector_statuses(self.completed_laps, changed_lap)
 
     def _save_lap(self, lap: LapResult) -> None:
         try:
@@ -770,10 +743,6 @@ class LapTracker(QObject):
                 "last_graph_reset_reason": self._last_graph_reset_reason,
             }
         )
-
-
-def same_scope(a: LapResult, b: LapResult) -> bool:
-    return a.track == b.track and a.car == b.car and a.driver_name == b.driver_name
 
 
 def personal_best_time(laps: list[LapResult], lap: LapResult) -> int:

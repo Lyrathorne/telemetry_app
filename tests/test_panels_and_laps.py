@@ -264,7 +264,7 @@ class PanelAndLapTests(unittest.TestCase):
             lap_2 = tracker.process_sample(finish_2)
 
             self.assertEqual(lap_2.sectors[0].comparison_status, "PURPLE")
-            self.assertEqual(lap_1.sectors[0].comparison_status, "YELLOW")
+            self.assertEqual(lap_1.sectors[0].comparison_status, "GREEN")
             self.assertEqual(lap_2.sectors[1].comparison_status, "PURPLE")
             self.assertEqual(lap_2.sectors[2].comparison_status, "PURPLE")
 
