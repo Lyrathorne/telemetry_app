@@ -35,6 +35,8 @@ class LapTracker(QObject):
         self._last_position: float | None = None
         self._last_sector_index: int | None = None
         self._last_sector_start_ms: int | None = None
+        self._completed_sector_total_ms = 0
+        self._partial_start_sector_index: int | None = None
 
     def start_session(self, game: str, track: str | None, car: str | None, driver_name: str | None = None) -> None:
         self.session_id = uuid4().hex
@@ -44,6 +46,8 @@ class LapTracker(QObject):
         self._last_position = None
         self._last_sector_index = None
         self._last_sector_start_ms = None
+        self._completed_sector_total_ms = 0
+        self._partial_start_sector_index = None
         self.storage.ensure_session(
             self.session_id,
             game=game,
@@ -63,7 +67,6 @@ class LapTracker(QObject):
         if sample.invalid_lap is True:
             self.active_lap.valid = False
 
-        self._update_sector_state(sample)
         completed = self._detect_completion(sample)
         self._last_position = sample.normalized_track_position
 
@@ -73,6 +76,8 @@ class LapTracker(QObject):
                 self.lap_completed.emit(lap)
                 self._start_lap(sample, incomplete_first=False)
                 return lap
+
+        self._update_sector_state(sample)
 
         self.lap_updated.emit(self.active_lap)
         return None
@@ -91,6 +96,7 @@ class LapTracker(QObject):
         if lap_number is None:
             lap_number = len(self.completed_laps) + 1
 
+        partial_first = self._is_partial_first_sample(sample, incomplete_first)
         self.active_lap = LapResult(
             lap_number=int(lap_number),
             valid=not bool(sample.invalid_lap),
@@ -100,10 +106,20 @@ class LapTracker(QObject):
             car=sample.car_name or None,
             session_id=self.session_id,
             started_at=datetime.now().isoformat(timespec="milliseconds"),
-            notes="Started mid-lap" if incomplete_first else "",
+            notes="Started mid-lap" if partial_first else "",
         )
         self._last_sector_index = sample.current_sector_index
         self._last_sector_start_ms = sample.current_lap_time_ms
+        self._completed_sector_total_ms = 0
+        self._partial_start_sector_index = sample.current_sector_index if partial_first else None
+
+    @staticmethod
+    def _is_partial_first_sample(sample: TelemetrySample, incomplete_first: bool) -> bool:
+        if not incomplete_first:
+            return False
+        if sample.current_sector_index not in (None, 0):
+            return True
+        return bool(sample.current_lap_time_ms and sample.current_lap_time_ms > 2000)
 
     def _detect_completion(self, sample: TelemetrySample) -> bool:
         if sample.completed_laps is not None:
@@ -149,42 +165,62 @@ class LapTracker(QObject):
             return
         if sector_index == self._last_sector_index:
             return
-        start_ms = self._last_sector_start_ms
-        current_ms = sample.current_lap_time_ms
-        sector_time = None
-        if start_ms is not None and current_ms is not None and current_ms >= start_ms:
-            sector_time = current_ms - start_ms
-        self.active_lap.sectors.append(
-            SectorResult(
-                sector_number=int(self._last_sector_index) + 1,
-                end_distance_m=sample.lap_distance,
-                time_ms=sector_time,
-                valid=self.active_lap.valid,
-            )
-        )
+        self._append_completed_sector(int(self._last_sector_index), sample)
         self._last_sector_index = sector_index
-        self._last_sector_start_ms = current_ms
+        self._last_sector_start_ms = sample.current_lap_time_ms
 
     def _finalize_open_sector(self, lap: LapResult, sample: TelemetrySample) -> None:
         if self._last_sector_index is None:
             return
-        existing = {sector.sector_number for sector in lap.sectors}
-        sector_number = int(self._last_sector_index) + 1
-        if sector_number in existing:
+        self._append_completed_sector(int(self._last_sector_index), sample, lap=lap, lap_time_ms=lap.lap_time_ms)
+
+    def _append_completed_sector(
+        self,
+        sector_index: int,
+        sample: TelemetrySample,
+        lap: LapResult | None = None,
+        lap_time_ms: int | None = None,
+    ) -> None:
+        target_lap = lap or self.active_lap
+        if target_lap is None:
             return
-        start_ms = self._last_sector_start_ms
-        end_ms = sample.last_lap_time_ms or sample.current_lap_time_ms or lap.lap_time_ms
-        sector_time = None
-        if start_ms is not None and end_ms is not None and end_ms >= start_ms:
-            sector_time = end_ms - start_ms
-        lap.sectors.append(
+        sector_number = sector_index + 1
+        if sector_number in {sector.sector_number for sector in target_lap.sectors}:
+            return
+        sector_time, source = self._sector_time_from_sample(sector_index, sample, lap_time_ms)
+        if sector_time is not None:
+            self._completed_sector_total_ms += sector_time
+        target_lap.sectors.append(
             SectorResult(
                 sector_number=sector_number,
                 end_distance_m=sample.lap_distance,
                 time_ms=sector_time,
-                valid=lap.valid,
+                valid=target_lap.valid,
+                timing_source=source,
             )
         )
+
+    def _sector_time_from_sample(
+        self,
+        sector_index: int,
+        sample: TelemetrySample,
+        lap_time_ms: int | None = None,
+    ) -> tuple[int | None, str]:
+        if sample.last_sector_time_ms is not None and sample.last_sector_time_ms > 0:
+            return sample.last_sector_time_ms, "acc_direct"
+        if self._partial_start_sector_index == sector_index:
+            return None, "partial_lap_unavailable"
+        if sample.current_split_time_ms is not None and sample.current_split_time_ms >= self._completed_sector_total_ms:
+            return sample.current_split_time_ms - self._completed_sector_total_ms, "acc_split_derived"
+        if sector_index == 2:
+            final_lap_time = sample.last_lap_time_ms or lap_time_ms
+            if final_lap_time is not None and final_lap_time >= self._completed_sector_total_ms:
+                return final_lap_time - self._completed_sector_total_ms, "acc_lap_derived"
+        start_ms = self._last_sector_start_ms
+        current_ms = sample.current_lap_time_ms
+        if start_ms is not None and current_ms is not None and current_ms >= start_ms:
+            return current_ms - start_ms, "sample_derived"
+        return None, "unavailable"
 
     def _apply_timing_colors(self, lap: LapResult) -> None:
         if not lap.valid or lap.lap_time_ms is None:

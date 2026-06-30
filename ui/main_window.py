@@ -496,7 +496,17 @@ class MainWindow(QMainWindow):
 
         self.shared_memory_group = QGroupBox("Shared-memory status")
         sm_layout = QFormLayout(self.shared_memory_group)
-        for key, caption in {"shared_memory": "Shared memory:", "game_state": "Game state:", "last_error": "Last error:"}.items():
+        for key, caption in {
+            "shared_memory": "Shared memory:",
+            "game_state": "Game state:",
+            "last_error": "Last error:",
+            "acc_sector_index": "Raw ACC sector:",
+            "acc_current_lap_time_ms": "ACC current lap:",
+            "acc_split_ms": "ACC split:",
+            "acc_last_sector_time_ms": "ACC last sector:",
+            "acc_completed_laps": "ACC completed laps:",
+            "acc_in_pit": "ACC pit:",
+        }.items():
             label = QLabel("--")
             label.setWordWrap(True)
             sm_layout.addRow(caption, label)
@@ -1143,13 +1153,66 @@ class MainWindow(QMainWindow):
             sector = current_sample.current_sector_index
             self.lap_labels["current_sector"].setText("--" if sector is None else str(int(sector) + 1))
             self.lap_labels["current_lap_time"].setText(format_time_ms(current_sample.current_lap_time_ms))
+        self._update_live_lap_tables_from_lap(lap, complete=False)
+        self._update_sector_tables_from_lap(lap)
 
     def handle_lap_completed(self, lap: LapResult) -> None:
         self.saved_laps.insert(0, lap)
         self.lap_labels["last_lap"].setText(format_time_ms(lap.lap_time_ms))
         valid_times = [item.lap_time_ms for item in self.saved_laps if item.valid and item.lap_time_ms is not None]
         self.lap_labels["best_lap"].setText(format_time_ms(min(valid_times) if valid_times else None))
+        self._update_live_lap_tables_from_lap(lap, complete=True)
         self._populate_laps_table()
+
+    def _update_live_lap_tables_from_lap(self, lap: LapResult, complete: bool) -> None:
+        sectors = {sector.sector_number: sector for sector in lap.sectors}
+        current_sample = lap.samples[-1] if lap.samples else None
+        row_values = [
+            str(lap.lap_number),
+            format_time_ms(lap.lap_time_ms if complete else (current_sample.current_lap_time_ms if current_sample else None)),
+            format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
+            format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
+            format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
+            "Unavailable",
+            "Invalid" if not lap.valid else ("Complete" if complete else "Current"),
+        ]
+        for table in self.live_lap_tables:
+            row = table.rowCount() - 1
+            for column, value in enumerate(row_values):
+                item = table.item(row, column)
+                if item is None:
+                    table.setItem(row, column, QTableWidgetItem(value))
+                elif item.text() != value:
+                    item.setText(value)
+            if complete:
+                table.insertRow(table.rowCount())
+
+    def _update_sector_tables_from_lap(self, lap: LapResult) -> None:
+        sectors = {sector.sector_number: sector for sector in lap.sectors}
+        current_sample = lap.samples[-1] if lap.samples else None
+        current = current_sample.current_sector_index if current_sample else None
+        completed_total = sum(sector.time_ms or 0 for sector in lap.sectors)
+        running_ms = None
+        if current_sample and current_sample.current_lap_time_ms is not None and current is not None:
+            running_ms = max(0, current_sample.current_lap_time_ms - completed_total)
+        for table in self.sector_timing_tables:
+            for row in range(table.rowCount()):
+                sector = sectors.get(row + 1)
+                if sector and sector.time_ms is not None:
+                    time_value = format_time_ms(sector.time_ms)
+                    status = sector.comparison_status or sector.timing_source
+                elif current == row and running_ms is not None:
+                    time_value = f"Running {format_time_ms(running_ms)}"
+                    status = "Current"
+                else:
+                    time_value = format_time_ms(None)
+                    status = "Waiting"
+                for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
+                    item = table.item(row, column)
+                    if item is None:
+                        table.setItem(row, column, QTableWidgetItem(value))
+                    elif item.text() != value:
+                        item.setText(value)
 
     def selected_lap_rows(self) -> list[int]:
         if not hasattr(self, "laps_table"):

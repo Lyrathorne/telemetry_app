@@ -1,5 +1,7 @@
 import struct
 import time
+import logging
+import os
 
 from PySide6.QtCore import QObject, QTimer
 
@@ -35,6 +37,7 @@ PHYSICS_HEADER_SIZE = struct.calcsize(PHYSICS_FORMAT)
 SPEED_KMH_OFFSET = PHYSICS_HEADER_SIZE + 4
 
 GRAPHICS_HEADER_FORMAT = "=iii"
+GRAPHICS_SPLIT_TEXT_OFFSET = 102
 GRAPHICS_COMPLETED_LAPS_OFFSET = 132
 GRAPHICS_POSITION_OFFSET = 136
 GRAPHICS_CURRENT_TIME_OFFSET = 140
@@ -44,6 +47,7 @@ GRAPHICS_SESSION_TIME_LEFT_OFFSET = 152
 GRAPHICS_DISTANCE_TRAVELED_OFFSET = 156
 GRAPHICS_IS_IN_PIT_OFFSET = 160
 GRAPHICS_CURRENT_SECTOR_OFFSET = 164
+GRAPHICS_LAST_SECTOR_TIME_OFFSET = 168
 
 
 class AccTelemetrySource(TelemetrySource):
@@ -63,6 +67,9 @@ class AccTelemetrySource(TelemetrySource):
         self._static_map: NamedSharedMemory | None = None
         self._last_packet_id: int | None = None
         self._last_sample_time = 0.0
+        self._last_timing_diagnostics: tuple | None = None
+        self._timing_diagnostics_enabled = os.environ.get("RACING_TELEMETRY_ACC_TIMING_DIAGNOSTICS") == "1"
+        self._logger = logging.getLogger(__name__)
 
     def start(self) -> None:
         if self.is_running():
@@ -131,6 +138,12 @@ class AccTelemetrySource(TelemetrySource):
                 "game_state": status_name,
                 "car_name": statics["car_name"],
                 "track_name": statics["track_name"],
+                "acc_sector_index": graphics.get("current_sector_index"),
+                "acc_current_lap_time_ms": graphics.get("current_lap_time_ms"),
+                "acc_split_ms": graphics.get("current_split_time_ms"),
+                "acc_last_sector_time_ms": graphics.get("last_sector_time_ms"),
+                "acc_completed_laps": graphics.get("completed_laps"),
+                "acc_in_pit": graphics.get("is_in_pit"),
             }
         )
 
@@ -146,6 +159,8 @@ class AccTelemetrySource(TelemetrySource):
         self._last_packet_id = physics["packet_id"]
         self._last_sample_time = time.monotonic()
         self._set_state(SourceState.CONNECTED, "Connected")
+        if self._timing_diagnostics_enabled:
+            self._log_timing_transition(graphics)
         self.sample_received.emit(
             TelemetrySample(
                 speed_kmh=max(0.0, physics["speed_kmh"]),
@@ -162,10 +177,42 @@ class AccTelemetrySource(TelemetrySource):
                 last_lap_time_ms=graphics.get("last_lap_time_ms"),
                 completed_laps=graphics.get("completed_laps"),
                 current_sector_index=graphics.get("current_sector_index"),
+                current_split_time_ms=graphics.get("current_split_time_ms"),
+                last_sector_time_ms=graphics.get("last_sector_time_ms"),
                 lap_distance=graphics.get("distance_traveled_m"),
                 in_pit=graphics.get("is_in_pit"),
             )
         )
+
+    def _log_timing_transition(self, graphics: dict) -> None:
+        current = (
+            graphics.get("completed_laps"),
+            graphics.get("current_sector_index"),
+            graphics.get("current_lap_time_ms"),
+            graphics.get("last_lap_time_ms"),
+            graphics.get("current_split_time_ms"),
+            graphics.get("last_sector_time_ms"),
+            graphics.get("distance_traveled_m"),
+            graphics.get("is_in_pit"),
+            graphics.get("status"),
+        )
+        if current == self._last_timing_diagnostics:
+            return
+        previous_sector = None if self._last_timing_diagnostics is None else self._last_timing_diagnostics[1]
+        self._logger.info(
+            "ACC timing transition: lap=%s sector=%s -> %s current_lap_time_ms=%s "
+            "raw_split_ms=%s last_sector_time_ms=%s last_lap_time_ms=%s in_pit=%s status=%s",
+            graphics.get("completed_laps"),
+            previous_sector,
+            graphics.get("current_sector_index"),
+            graphics.get("current_lap_time_ms"),
+            graphics.get("current_split_time_ms"),
+            graphics.get("last_sector_time_ms"),
+            graphics.get("last_lap_time_ms"),
+            graphics.get("is_in_pit"),
+            graphics.get("status"),
+        )
+        self._last_timing_diagnostics = current
 
     def _handle_mapping_lost(self, message: str) -> None:
         self._poll_timer.stop()
@@ -212,9 +259,11 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
     current_lap_time_ms = read_int32(mapping, GRAPHICS_CURRENT_TIME_OFFSET)
     last_lap_time_ms = read_int32(mapping, GRAPHICS_LAST_TIME_OFFSET)
     best_lap_time_ms = read_int32(mapping, GRAPHICS_BEST_TIME_OFFSET)
+    current_split_time_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_SPLIT_TEXT_OFFSET, 15))
     distance_traveled_m = read_float32(mapping, GRAPHICS_DISTANCE_TRAVELED_OFFSET)
     is_in_pit = bool(read_int32(mapping, GRAPHICS_IS_IN_PIT_OFFSET))
     current_sector_index = read_int32(mapping, GRAPHICS_CURRENT_SECTOR_OFFSET)
+    last_sector_time_ms = read_int32(mapping, GRAPHICS_LAST_SECTOR_TIME_OFFSET)
     return {
         "packet_id": int(packet_id),
         "status": int(status),
@@ -223,6 +272,8 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
         "current_lap_time_ms": positive_time_or_none(current_lap_time_ms),
         "last_lap_time_ms": positive_time_or_none(last_lap_time_ms),
         "best_lap_time_ms": positive_time_or_none(best_lap_time_ms),
+        "current_split_time_ms": positive_time_or_none(current_split_time_ms),
+        "last_sector_time_ms": positive_time_or_none(last_sector_time_ms),
         "distance_traveled_m": max(0.0, float(distance_traveled_m)),
         "is_in_pit": is_in_pit,
         "current_sector_index": current_sector_index if 0 <= current_sector_index <= 5 else None,
@@ -263,6 +314,21 @@ def read_float32(mapping: NamedSharedMemory, offset: int) -> float:
 
 def positive_time_or_none(value: int) -> int | None:
     return int(value) if value > 0 else None
+
+
+def parse_acc_time_text(value: str) -> int | None:
+    text = value.strip().replace("+", "").replace("-", "")
+    if not text or text in {"--", "-:--.---"}:
+        return None
+    try:
+        parts = text.split(":")
+        seconds_text = parts[-1]
+        seconds = float(seconds_text)
+        minutes = int(parts[-2]) if len(parts) >= 2 else 0
+        hours = int(parts[-3]) if len(parts) >= 3 else 0
+        return int(round(((hours * 60 + minutes) * 60 + seconds) * 1000))
+    except (ValueError, IndexError):
+        return None
 
 
 def normalize_acc_gear(raw_gear: int) -> int:

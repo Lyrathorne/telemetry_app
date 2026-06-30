@@ -218,10 +218,20 @@ ACC lap detection uses canonical sample fields. The ACC shared-memory reader exp
 - previous/last lap time
 - best lap time
 - current sector index
+- current split time
+- last completed sector time
 - pit flag
 - distance travelled
 
 Lap completion prefers the game-provided completed-lap counter. Position wraparound is only a fallback. Sector times are derived from sector-index transitions and current lap time; they are not claimed as globally official timing if the game does not provide completed split values directly.
+
+For ACC sector timing, the app prefers direct `lastSectorTime` from the graphics shared-memory page. If that is unavailable, it derives individual sector times from the cumulative ACC split field. Sample-derived timing is only a fallback and is labeled in saved sector metadata. The SQLite lap database schema stores `timing_source` for each sector and migrates existing databases in place.
+
+To log ACC timing transitions while testing real laps:
+
+```bat
+RacingTelemetry-debug.exe --diagnostics-acc-timing
+```
 
 Timing colors use local comparison scopes:
 

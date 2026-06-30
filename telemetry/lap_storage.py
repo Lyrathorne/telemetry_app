@@ -9,7 +9,7 @@ from app.paths import data_dir, ensure_user_directories
 from models import LapResult, SectorResult, TelemetrySample
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class LapStorage:
@@ -27,7 +27,7 @@ class LapStorage:
 
     def _initialize(self) -> None:
         with closing(self.connect()) as connection:
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS telemetry_sessions (
@@ -67,6 +67,7 @@ class LapStorage:
                     time_ms INTEGER,
                     valid INTEGER NOT NULL,
                     comparison_status TEXT,
+                    timing_source TEXT,
                     FOREIGN KEY(lap_id) REFERENCES laps(id) ON DELETE CASCADE
                 );
 
@@ -96,6 +97,20 @@ class LapStorage:
                 CREATE INDEX IF NOT EXISTS idx_samples_lap_time ON lap_samples(lap_id, lap_time);
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(sectors)")}
+            if "timing_source" not in columns:
+                connection.execute("ALTER TABLE sectors ADD COLUMN timing_source TEXT")
+            connection.execute(
+                """
+                DELETE FROM sectors
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM sectors GROUP BY lap_id, sector_number
+                )
+                """
+            )
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sectors_lap_number ON sectors(lap_id, sector_number)")
+            if version < SCHEMA_VERSION:
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
 
     def ensure_session(
@@ -150,8 +165,8 @@ class LapStorage:
             connection.executemany(
                 """
                 INSERT INTO sectors
-                (lap_id, sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (lap_id, sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status, timing_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -162,6 +177,7 @@ class LapStorage:
                         sector.time_ms,
                         int(sector.valid),
                         sector.comparison_status,
+                        sector.timing_source,
                     )
                     for sector in lap.sectors
                 ],
@@ -202,10 +218,11 @@ class LapStorage:
                         time_ms=sector_row[3],
                         valid=bool(sector_row[4]),
                         comparison_status=sector_row[5],
+                        timing_source=sector_row[6] or "unavailable",
                     )
                     for sector_row in connection.execute(
                         """
-                        SELECT sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status
+                        SELECT sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status, timing_source
                         FROM sectors WHERE lap_id = ? ORDER BY sector_number
                         """,
                         (lap_id,),

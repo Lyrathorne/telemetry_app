@@ -23,7 +23,10 @@ class TelemetrySample:
     current_lap_time_ms: int | None = None
     completed_laps: int | None = None
     current_sector_index: int | None = None
+    current_split_time_ms: int | None = None
+    last_sector_time_ms: int | None = None
     last_lap_time_ms: int | None = None
+    lap_valid: bool | None = None
     invalid_lap: bool | None = None
     in_pit: bool | None = None
     clutch_percent: float | None = None
@@ -82,6 +85,7 @@ class SectorResult:
     time_ms: int | None = None
     valid: bool = True
     comparison_status: str | None = None
+    timing_source: str = "unavailable"
 
 
 @dataclass(slots=True)
@@ -110,11 +114,15 @@ class LapResult:
 
 
 def format_time_ms(time_ms: int | None) -> str:
-    if time_ms is None:
-        return "--"
-    minutes, remainder = divmod(max(0, int(time_ms)), 60000)
+    if time_ms is None or int(time_ms) < 0:
+        return "\u2014"
+    total_ms = int(time_ms)
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60000)
     seconds, millis = divmod(remainder, 1000)
-    return f"{minutes}:{seconds:02d}.{millis:03d}"
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+    return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
 METRICS = {

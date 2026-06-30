@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from models import TelemetrySample
+from models import LapResult, SectorResult, TelemetrySample
 from telemetry.lap_comparison import (
     aligned_metric,
     assert_laps_comparable,
@@ -37,6 +37,8 @@ def lap_sample(
     completed_laps: int,
     sector: int = 0,
     invalid: bool = False,
+    split_ms: int | None = None,
+    last_sector_ms: int | None = None,
 ) -> TelemetrySample:
     return TelemetrySample(
         timestamp=timestamp,
@@ -53,10 +55,22 @@ def lap_sample(
         last_lap_time_ms=lap_ms if completed_laps else None,
         completed_laps=completed_laps,
         current_sector_index=sector,
+        current_split_time_ms=split_ms,
+        last_sector_time_ms=last_sector_ms,
         normalized_track_position=position,
         lap_distance=position * 5000.0,
         invalid_lap=invalid,
     )
+
+
+def make_lap_with_sectors(times: list[int], complete: bool) -> LapResult:
+    lap = LapResult(lap_number=1, lap_time_ms=sum(times) if complete else None, valid=True, complete=complete)
+    lap.samples.append(TelemetrySample(current_lap_time_ms=sum(times), current_sector_index=len(times)))
+    lap.sectors = [
+        SectorResult(sector_number=index + 1, time_ms=time_ms, valid=True, timing_source="acc_split_derived")
+        for index, time_ms in enumerate(times)
+    ]
+    return lap
 
 
 class PanelAndLapTests(unittest.TestCase):
@@ -125,10 +139,58 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertIsNone(duplicate)
             self.assertEqual(len(tracker.completed_laps), 1)
             self.assertEqual(completed.lap_time_ms, 60000)
-            self.assertEqual([sector.time_ms for sector in completed.sectors[:2]], [20000, 20000])
+            self.assertEqual([sector.time_ms for sector in completed.sectors[:3]], [20000, 20000, 20000])
             loaded = storage.load_laps()
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0].lap_time_ms, 60000)
+
+    def test_acc_like_sector_splits_with_last_lap_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(31.284, 31284, 0.30, 0, 1, split_ms=31284))
+            tracker.process_sample(lap_sample(74.135, 74135, 0.68, 0, 2, split_ms=74135))
+            finish = lap_sample(106.942, 100, 0.01, 1, 0, last_sector_ms=32807)
+            finish.last_lap_time_ms = 106942
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            self.assertEqual([sector.time_ms for sector in completed.sectors], [31284, 42851, 32807])
+            self.assertEqual([sector.timing_source for sector in completed.sectors], ["acc_split_derived", "acc_split_derived", "acc_direct"])
+            loaded = storage.load_laps()
+            self.assertEqual([sector.time_ms for sector in loaded[0].sectors], [31284, 42851, 32807])
+            self.assertEqual(loaded[0].sectors[2].timing_source, "acc_direct")
+
+    def test_duplicate_sector_transition_does_not_duplicate_sector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(31.284, 31284, 0.30, 0, 1, split_ms=31284))
+            tracker.process_sample(lap_sample(31.300, 31300, 0.31, 0, 1, split_ms=31284))
+            self.assertEqual(len(tracker.active_lap.sectors), 1)
+
+    def test_partial_first_lap_does_not_fabricate_previous_sector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(50.0, 50000, 0.50, 0, 1))
+            tracker.process_sample(lap_sample(74.135, 74135, 0.68, 0, 2))
+            self.assertEqual([sector.sector_number for sector in tracker.active_lap.sectors], [2])
+            self.assertIsNone(tracker.active_lap.sectors[0].time_ms)
+            self.assertEqual(tracker.active_lap.notes, "Started mid-lap")
+
+    def test_live_lap_table_updates_sector_cells(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("live_lap_timing")
+        window.handle_lap_updated(make_lap_with_sectors([31284, 42851], complete=False))
+        table = window.live_lap_tables[-1]
+        self.assertEqual(table.item(0, 2).text(), "00:31.284")
+        self.assertEqual(table.item(0, 3).text(), "00:42.851")
+        self.assertEqual(table.item(0, 4).text(), "—")
+        window.close()
 
     def test_invalid_lap_and_incomplete_stop_are_saved(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

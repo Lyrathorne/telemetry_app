@@ -19,6 +19,11 @@ def main() -> int:
 
         from ui.main_window import MainWindow
 
+        if "--diagnostics-acc-timing" in sys.argv:
+            import os
+
+            os.environ["RACING_TELEMETRY_ACC_TIMING_DIAGNOSTICS"] = "1"
+
         app = QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
         window = MainWindow(reset_layout="--reset-layout" in sys.argv)
