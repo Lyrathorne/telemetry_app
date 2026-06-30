@@ -105,8 +105,11 @@ The dashboard uses movable Qt dock panels:
 - `Connection Diagnostics`
 - `Imported Sessions`
 - `Comparison Graphs`
+- `Laps`
 
 Use the `View` menu to hide or restore panels. Panels can be docked, floated, resized, and moved around the window. The current geometry and dock arrangement are saved automatically when the app closes and restored on the next start when layout restoration is enabled.
+
+Every panel has a context menu with recovery actions such as detach, dock back, hide, maximize/restore detached panel windows, and reset panel size. The explicit `Detach` action moves the original panel widget into a normal top-level Qt window, so graph/session data is not duplicated or reset. Use `View > Recover all panels` if a panel is hidden or moved off-screen.
 
 The `Layouts` menu includes:
 
@@ -126,6 +129,7 @@ Each graph panel supports:
 
 - adding and removing metrics
 - hiding/showing displayed metrics with checkboxes
+- hiding/showing the settings area so the graph fills the panel
 - clearing only the visual view
 - starting a new graph session
 - pausing and resuming rendering without losing samples
@@ -146,6 +150,45 @@ Default metric ranges:
 - steering: `-100-100`
 
 To keep mixed units readable, a graph panel accepts one unit group at a time. For example, use one panel for speed, another for RPM, and another for throttle/brake/clutch. Full raw history is retained for the graph session; long visible ranges are downsampled for rendering instead of deleting old telemetry.
+
+## Laps, Sectors, And Timing
+
+Completed laps are stored in a SQLite database under:
+
+```text
+%LOCALAPPDATA%\RacingTelemetry\data\racing_telemetry.sqlite3
+```
+
+The schema stores telemetry sessions, laps, sectors, and lap samples. Foreign keys and WAL mode are enabled, and completed laps are saved transactionally.
+
+ACC lap detection uses canonical sample fields. The ACC shared-memory reader exposes these graphics-page values when available:
+
+- completed lap counter
+- current lap time
+- previous/last lap time
+- best lap time
+- current sector index
+- pit flag
+- distance travelled
+
+Lap completion prefers the game-provided completed-lap counter. Position wraparound is only a fallback. Sector times are derived from sector-index transitions and current lap time; they are not claimed as globally official timing if the game does not provide completed split values directly.
+
+Timing colors use local comparison scopes:
+
+- Purple: fastest valid result among loaded/current-session comparable laps.
+- Green: faster than the selected/personal reference.
+- Yellow: slower than the selected/personal reference.
+- Neutral: no reference, incomplete timing, or invalid lap/sector.
+
+The app never claims purple means a global world-best result.
+
+Lap comparison aligns laps by lap distance when available, or normalized position otherwise. Each lap starts at zero for comparison, even if the source reports cumulative distance. The time-delta graph uses a common position grid and computes:
+
+```text
+comparison elapsed lap time - reference elapsed lap time
+```
+
+Negative means the comparison lap is ahead; positive means it is behind.
 
 ## Importing Telemetry
 

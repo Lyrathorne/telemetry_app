@@ -116,6 +116,35 @@ class GraphPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
+        graph_toolbar = QHBoxLayout()
+        self.settings_toggle_button = QPushButton("Hide graph settings")
+        self.settings_toggle_button.setCheckable(True)
+        self.settings_toggle_button.toggled.connect(self.set_settings_hidden)
+        self.toolbar_pause_button = QPushButton("Pause")
+        self.toolbar_pause_button.setCheckable(True)
+        self.toolbar_pause_button.toggled.connect(self._set_paused)
+        self.toolbar_live_button = QPushButton("Return to live")
+        self.toolbar_live_button.clicked.connect(self.return_to_live)
+        self.toolbar_reset_button = QPushButton("Reset view")
+        self.toolbar_reset_button.clicked.connect(self.reset_view)
+        self.export_image_button = QPushButton("Export image")
+        self.export_image_button.clicked.connect(self.export_image)
+        for widget in (
+            self.settings_toggle_button,
+            self.toolbar_pause_button,
+            self.toolbar_live_button,
+            self.toolbar_reset_button,
+            self.export_image_button,
+        ):
+            graph_toolbar.addWidget(widget)
+        graph_toolbar.addStretch(1)
+        layout.addLayout(graph_toolbar)
+
+        self.settings_container = QWidget()
+        settings_layout = QVBoxLayout(self.settings_container)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(4)
+
         metric_layout = QGridLayout()
         self.metric_combo = QComboBox()
         for key, label in METRICS.items():
@@ -142,7 +171,7 @@ class GraphPanel(QWidget):
         metric_layout.addWidget(self.remove_metric_button, 2, 0, 1, 2)
         metric_layout.addWidget(self.clear_metrics_button, 3, 0, 1, 2)
         metric_layout.addWidget(self.reset_metrics_button, 4, 0, 1, 2)
-        layout.addLayout(metric_layout)
+        settings_layout.addLayout(metric_layout)
 
         controls = QHBoxLayout()
         self.pause_button = QPushButton("Pause graph")
@@ -165,7 +194,7 @@ class GraphPanel(QWidget):
             self.legend_checkbox,
         ):
             controls.addWidget(widget)
-        layout.addLayout(controls)
+        settings_layout.addLayout(controls)
 
         axis_layout = QFormLayout()
         self.x_mode_combo = QComboBox()
@@ -219,7 +248,8 @@ class GraphPanel(QWidget):
         axis_layout.addRow("Manual Y min", self.y_min)
         axis_layout.addRow("Manual Y max", self.y_max)
         axis_layout.addRow(self.reset_y_button)
-        layout.addLayout(axis_layout)
+        settings_layout.addLayout(axis_layout)
+        layout.addWidget(self.settings_container)
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
@@ -512,7 +542,13 @@ class GraphPanel(QWidget):
 
     def _set_paused(self, paused: bool) -> None:
         self.paused = paused
+        for button in (self.pause_button, self.toolbar_pause_button):
+            if button.isChecked() != paused:
+                button.blockSignals(True)
+                button.setChecked(paused)
+                button.blockSignals(False)
         self.pause_button.setText("Resume graph" if paused else "Pause graph")
+        self.toolbar_pause_button.setText("Resume" if paused else "Pause")
         if not paused:
             self.refresh_plot()
 
@@ -551,6 +587,7 @@ class GraphPanel(QWidget):
             "manual_y": [self.y_min.value(), self.y_max.value()],
             "include_zero": self.include_zero_checkbox.isChecked(),
             "legend": self.legend_checkbox.isChecked(),
+            "settings_hidden": self.settings_toggle_button.isChecked(),
         }
 
     def restore_settings_state(self, state: dict) -> None:
@@ -577,6 +614,8 @@ class GraphPanel(QWidget):
             self.y_max.setValue(float(manual_y[1]))
         self.include_zero_checkbox.setChecked(bool(state.get("include_zero", True)))
         self.legend_checkbox.setChecked(bool(state.get("legend", True)))
+        self.set_settings_hidden(bool(state.get("settings_hidden", False)))
+        self.settings_toggle_button.setChecked(bool(state.get("settings_hidden", False)))
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value, default) -> None:
@@ -585,6 +624,20 @@ class GraphPanel(QWidget):
             index = combo.findData(default)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def set_settings_hidden(self, hidden: bool) -> None:
+        self.settings_container.setVisible(not hidden)
+        self.settings_toggle_button.setText("Show settings" if hidden else "Hide graph settings")
+        if self.plot_widget is not None:
+            self.plot_widget.updateGeometry()
+
+    def reset_view(self) -> None:
+        self.reset_x_axis()
+        self.reset_y_axis()
+        self.refresh_plot()
+
+    def export_image(self) -> None:
+        self.error_label.setText("Use the operating system screenshot tools or export data from a saved lap/session.")
 
 
 def combined_metric_default_range(metrics: list[str]) -> tuple[float, float]:

@@ -19,6 +19,13 @@ class TelemetrySample:
     lap_number: int | None = None
     lap_time: float | None = None
     lap_distance: float | None = None
+    normalized_track_position: float | None = None
+    current_lap_time_ms: int | None = None
+    completed_laps: int | None = None
+    current_sector_index: int | None = None
+    last_lap_time_ms: int | None = None
+    invalid_lap: bool | None = None
+    in_pit: bool | None = None
     clutch_percent: float | None = None
     steering: float | None = None
 
@@ -65,6 +72,49 @@ class TelemetrySession:
         if len(laps) == 1:
             return f"Lap {next(iter(laps))}"
         return ""
+
+
+@dataclass(slots=True)
+class SectorResult:
+    sector_number: int
+    start_distance_m: float | None = None
+    end_distance_m: float | None = None
+    time_ms: int | None = None
+    valid: bool = True
+    comparison_status: str | None = None
+
+
+@dataclass(slots=True)
+class LapResult:
+    id: str = field(default_factory=lambda: uuid4().hex)
+    lap_number: int = 0
+    lap_time_ms: int | None = None
+    valid: bool = True
+    complete: bool = False
+    driver_name: str | None = None
+    game: str = ""
+    track: str | None = None
+    car: str | None = None
+    session_id: str = ""
+    sectors: list[SectorResult] = field(default_factory=list)
+    samples: list[TelemetrySample] = field(default_factory=list)
+    started_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))
+    completed_at: str | None = None
+    notes: str = ""
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if self.lap_time_ms is None:
+            return None
+        return self.lap_time_ms / 1000.0
+
+
+def format_time_ms(time_ms: int | None) -> str:
+    if time_ms is None:
+        return "--"
+    minutes, remainder = divmod(max(0, int(time_ms)), 60000)
+    seconds, millis = divmod(remainder, 1000)
+    return f"{minutes}:{seconds:02d}.{millis:03d}"
 
 
 METRICS = {

@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, Qt, QThread, QTimer, Signal
@@ -37,14 +39,17 @@ from PySide6.QtWidgets import (
 
 from app.paths import logs_dir, settings_dir
 from app.settings import AppSettings, DEFAULT_F1_UDP_PORT
-from models import METRICS, TelemetrySample, TelemetrySession, format_gear
+from models import METRICS, LapResult, TelemetrySample, TelemetrySession, format_gear, format_time_ms
 from telemetry import SOURCE_LABELS, SOURCE_TYPES
 from telemetry.base import SourceState
 from telemetry.comparison import build_comparison_series, preferred_axis, speed_delta
 from telemetry.f1_2018 import F12018TelemetrySource
 from telemetry.importer import TelemetryImportError, import_telemetry_file
+from telemetry.lap_comparison import aligned_metric, assert_laps_comparable, common_position_grid, sector_marker_positions, time_delta
+from telemetry.lap_tracker import LapTracker
 from telemetry.session_store import SessionStore
 from ui.graph_panel import GraphPanel, PENS
+from ui.docking import DetachedPanelWindow, install_dock_context_menu
 
 try:
     import pyqtgraph as pg
@@ -58,12 +63,15 @@ class MainWindow(QMainWindow):
         self.settings = AppSettings()
         self.session_store = SessionStore()
         self.sessions: list[TelemetrySession] = self.session_store.load()
+        self.lap_tracker = LapTracker()
+        self.saved_laps: list[LapResult] = self.lap_tracker.storage.load_laps()
         self.active_source = None
         self.telemetry_labels: dict[str, QLabel] = {}
         self.common_labels: dict[str, QLabel] = {}
         self.f1_labels: dict[str, QLabel] = {}
         self.shared_memory_labels: dict[str, QLabel] = {}
         self.docks: dict[str, QDockWidget] = {}
+        self.detached_windows: dict[str, DetachedPanelWindow] = {}
         self.graph_panels: list[GraphPanel] = []
         self.graph_counter = 0
         self.recording_samples: list[TelemetrySample] = []
@@ -72,6 +80,11 @@ class MainWindow(QMainWindow):
         self._sample_count_window = 0
         self._rate_window_started = time.monotonic()
         self._logger = logging.getLogger(__name__)
+        self.lap_tracker.lap_completed.connect(self.handle_lap_completed)
+        self.lap_tracker.lap_updated.connect(self.handle_lap_updated)
+        self.lap_tracker.storage_error.connect(
+            lambda message: self._logger.error("Lap storage error: %s", message)
+        )
 
         self.setWindowTitle("Racing Telemetry")
         self.setMinimumSize(900, 640)
@@ -127,6 +140,9 @@ class MainWindow(QMainWindow):
         self.reset_layout_action.setShortcut(QKeySequence("Ctrl+0"))
         self.reset_layout_action.triggered.connect(self.reset_layout)
 
+        self.recover_panels_action = QAction("Recover all panels", self)
+        self.recover_panels_action.triggered.connect(self.recover_all_panels)
+
         self.save_layout_action = QAction("Save layout as...", self)
         self.save_layout_action.triggered.connect(self.save_layout_as)
 
@@ -171,6 +187,7 @@ class MainWindow(QMainWindow):
         self.view_menu.addSeparator()
         self.view_menu.addAction(self.add_graph_action)
         self.view_menu.addAction(self.reset_layout_action)
+        self.view_menu.addAction(self.recover_panels_action)
 
         layouts_menu = self.menuBar().addMenu("Layouts")
         for name in ("Default", "Live Driving", "Telemetry Analysis"):
@@ -226,6 +243,12 @@ class MainWindow(QMainWindow):
             self._create_comparison_widget(),
             Qt.DockWidgetArea.BottomDockWidgetArea,
         )
+        self.laps_dock = self._add_dock(
+            "laps",
+            "Laps",
+            self._create_laps_widget(),
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+        )
         self.add_graph_panel("Live Graphs")
         self._restore_graph_panel_settings()
 
@@ -244,6 +267,7 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(area, dock)
         self.docks[object_name] = dock
+        install_dock_context_menu(self, dock)
         return dock
 
     def _create_source_controls(self) -> QWidget:
@@ -392,6 +416,49 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         return widget
 
+    def _create_laps_widget(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        timing_group = QGroupBox("Live timing")
+        timing_layout = QFormLayout(timing_group)
+        self.lap_labels: dict[str, QLabel] = {}
+        for key, caption in {
+            "current_lap": "Current lap:",
+            "current_sector": "Current sector:",
+            "current_lap_time": "Current lap time:",
+            "last_lap": "Last lap:",
+            "best_lap": "Best lap:",
+            "timing_scope": "Timing colors:",
+        }.items():
+            label = QLabel("--")
+            label.setWordWrap(True)
+            timing_layout.addRow(caption, label)
+            self.lap_labels[key] = label
+        self.lap_labels["timing_scope"].setText("Purple: fastest among loaded/current-session valid laps")
+        layout.addWidget(timing_group)
+
+        self.laps_table = QTableWidget(0, 9)
+        self.laps_table.setHorizontalHeaderLabels(
+            ["Lap", "Lap time", "Sector 1", "Sector 2", "Sector 3", "Delta", "Valid", "Car", "Track"]
+        )
+        self.laps_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.laps_table.setSortingEnabled(True)
+        layout.addWidget(self.laps_table)
+
+        buttons = QHBoxLayout()
+        for text, handler in (
+            ("Compare selected laps", self.compare_selected_laps),
+            ("Delete selected lap", self.delete_selected_lap),
+            ("Export selected lap", self.export_selected_lap),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        self._populate_laps_table()
+        return widget
+
     def _create_comparison_widget(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -468,6 +535,11 @@ class MainWindow(QMainWindow):
         self.active_source.error_occurred.connect(self.handle_source_error)
         self.active_source.diagnostics_changed.connect(self.handle_diagnostics)
         self.source_label.setText(f"Source: {SOURCE_LABELS[source_id]}")
+        self.lap_tracker.start_session(
+            game=SOURCE_LABELS[source_id],
+            track=None,
+            car=None,
+        )
         self.common_labels["running"].setText("Starting")
         self.common_labels["connection_state"].setText("Starting")
         self._logger.info("Starting telemetry source: %s", SOURCE_LABELS[source_id])
@@ -487,6 +559,7 @@ class MainWindow(QMainWindow):
         source = self.active_source
         self._logger.info("Stopping telemetry source: %s", source.display_name)
         source.stop()
+        self.lap_tracker.stop_session()
         self._detach_source(source)
         self.active_source = None
         self._status_timer.stop()
@@ -510,6 +583,7 @@ class MainWindow(QMainWindow):
         self.common_labels["session_state"].setText(sample.session_state or "--")
         for panel in self.graph_panels:
             panel.add_sample(sample)
+        self.lap_tracker.process_sample(sample)
         if self.is_recording:
             self.recording_samples.append(sample)
             self.recording_count_label.setText(f"Samples: {len(self.recording_samples)}")
@@ -627,6 +701,120 @@ class MainWindow(QMainWindow):
                 self.sessions_table.setItem(row, column, QTableWidgetItem(value))
         self.sessions_table.resizeColumnsToContents()
         self._update_actions()
+
+    def _populate_laps_table(self) -> None:
+        if not hasattr(self, "laps_table"):
+            return
+        self.laps_table.setSortingEnabled(False)
+        self.laps_table.setRowCount(len(self.saved_laps))
+        for row, lap in enumerate(self.saved_laps):
+            sectors = {sector.sector_number: sector for sector in lap.sectors}
+            values = [
+                str(lap.lap_number),
+                format_time_ms(lap.lap_time_ms),
+                format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
+                format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
+                format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
+                "--",
+                "Valid" if lap.valid else "Invalid",
+                lap.car or "--",
+                lap.track or "--",
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, lap.id)
+                if not lap.valid:
+                    item.setForeground(Qt.GlobalColor.gray)
+                self.laps_table.setItem(row, column, item)
+        self.laps_table.setSortingEnabled(True)
+        self.laps_table.resizeColumnsToContents()
+
+    def handle_lap_updated(self, lap: LapResult) -> None:
+        if not hasattr(self, "lap_labels"):
+            return
+        self.lap_labels["current_lap"].setText(str(lap.lap_number))
+        current_sample = lap.samples[-1] if lap.samples else None
+        if current_sample is not None:
+            sector = current_sample.current_sector_index
+            self.lap_labels["current_sector"].setText("--" if sector is None else str(int(sector) + 1))
+            self.lap_labels["current_lap_time"].setText(format_time_ms(current_sample.current_lap_time_ms))
+
+    def handle_lap_completed(self, lap: LapResult) -> None:
+        self.saved_laps.insert(0, lap)
+        self.lap_labels["last_lap"].setText(format_time_ms(lap.lap_time_ms))
+        valid_times = [item.lap_time_ms for item in self.saved_laps if item.valid and item.lap_time_ms is not None]
+        self.lap_labels["best_lap"].setText(format_time_ms(min(valid_times) if valid_times else None))
+        self._populate_laps_table()
+
+    def selected_lap_rows(self) -> list[int]:
+        if not hasattr(self, "laps_table"):
+            return []
+        return sorted({index.row() for index in self.laps_table.selectedIndexes()})
+
+    def selected_laps(self) -> list[LapResult]:
+        rows = self.selected_lap_rows()
+        return [self.saved_laps[row] for row in rows if 0 <= row < len(self.saved_laps)]
+
+    def compare_selected_laps(self) -> None:
+        laps = self.selected_laps()
+        if len(laps) < 2:
+            self._show_error("Lap comparison unavailable", "Select at least two saved laps.")
+            return
+        if self.comparison_plot is None:
+            return
+        try:
+            assert_laps_comparable(laps)
+        except ValueError as error:
+            self._show_error("Lap comparison unavailable", str(error))
+            return
+        grid = common_position_grid(laps)
+        if grid.size == 0:
+            self._show_error("Lap comparison unavailable", "Selected laps do not contain lap distance or normalized position.")
+            return
+        metric = self.comparison_metric_combo.currentData() or "speed_kmh"
+        self.comparison_plot.clear()
+        self.comparison_plot.addLegend()
+        for index, lap in enumerate(laps):
+            y = aligned_metric(lap, metric, grid)
+            if y.size:
+                self.comparison_plot.plot(grid, y, pen=pg.mkPen(PENS[index % len(PENS)], width=2), name=f"Lap {lap.lap_number}")
+        for position in sector_marker_positions(laps[0]):
+            self.comparison_plot.addLine(x=position, pen=pg.mkPen("#888888", style=Qt.PenStyle.DashLine))
+        delta_x, delta_y = time_delta(laps[0], laps[1])
+        if delta_x.size and delta_y.size:
+            self.comparison_plot.plot(delta_x, delta_y, pen=pg.mkPen("#ffffff", width=1), name="Time delta: comparison - reference")
+
+    def delete_selected_lap(self) -> None:
+        laps = self.selected_laps()
+        if not laps:
+            return
+        reply = QMessageBox.question(self, "Delete lap", "Delete selected saved lap?")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for lap in laps:
+            self.lap_tracker.storage.delete_lap(lap.id)
+            self.saved_laps = [item for item in self.saved_laps if item.id != lap.id]
+        self._populate_laps_table()
+
+    def export_selected_lap(self) -> None:
+        laps = self.selected_laps()
+        if not laps:
+            return
+        lap = laps[0]
+        path, _filter = QFileDialog.getSaveFileName(self, "Export lap", self.settings.export_directory(), "Telemetry lap (*.json)")
+        if not path:
+            return
+        data = {
+            "lap_number": lap.lap_number,
+            "lap_time_ms": lap.lap_time_ms,
+            "valid": lap.valid,
+            "complete": lap.complete,
+            "track": lap.track,
+            "car": lap.car,
+            "sectors": [asdict(sector) for sector in lap.sectors],
+            "samples": [{field: getattr(sample, field) for field in TelemetrySample.__dataclass_fields__} for sample in lap.samples],
+        }
+        Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def selected_session_rows(self) -> list[int]:
         return sorted({index.row() for index in self.sessions_table.selectedIndexes()})
@@ -810,7 +998,7 @@ class MainWindow(QMainWindow):
             geometry = QByteArray.fromBase64(data["geometry"].encode("ascii"))
             state = QByteArray.fromBase64(data["state"].encode("ascii"))
         except (OSError, KeyError, json.JSONDecodeError, TypeError) as error:
-            self._logger.exception("Failed to load layout")
+            self._logger.warning("Failed to load layout: %s", error)
             self._show_error("Layout unavailable", f"Could not load layout: {error}")
             return False
         self.restoreGeometry(geometry)
@@ -850,6 +1038,48 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen and not screen.availableGeometry().intersects(self.frameGeometry()):
             self.move(screen.availableGeometry().topLeft())
+        for window in self.detached_windows.values():
+            if screen and not screen.availableGeometry().intersects(window.frameGeometry()):
+                window.move(screen.availableGeometry().topLeft())
+
+    def detach_panel(self, dock_id: str) -> None:
+        if dock_id in self.detached_windows:
+            self.detached_windows[dock_id].show()
+            self.detached_windows[dock_id].raise_()
+            return
+        dock = self.docks[dock_id]
+        widget = dock.widget()
+        if widget is None:
+            return
+        dock.setWidget(QWidget())
+        dock.hide()
+        window = DetachedPanelWindow(self, dock, widget)
+        self.detached_windows[dock_id] = window
+        window.show()
+        self._ensure_window_visible()
+
+    def dock_panel_back(self, dock_id: str) -> None:
+        window = self.detached_windows.pop(dock_id, None)
+        if window is None:
+            dock = self.docks.get(dock_id)
+            if dock is not None:
+                dock.show()
+            return
+        widget = window.takeCentralWidget()
+        dock = self.docks[dock_id]
+        if widget is not None:
+            dock.setWidget(widget)
+        window.hide()
+        window.deleteLater()
+        dock.show()
+        dock.raise_()
+
+    def recover_all_panels(self) -> None:
+        for dock_id in list(self.detached_windows):
+            self.dock_panel_back(dock_id)
+        for dock in self.docks.values():
+            dock.show()
+        self._ensure_window_visible()
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -952,10 +1182,14 @@ class MainWindow(QMainWindow):
     def _show_error(self, title: str, message: str) -> None:
         self._logger.error("%s: %s", title, message)
         self.error_label.setText(message)
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return
         QMessageBox.warning(self, title, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.stop_active_source()
+        for dock_id in list(self.detached_windows):
+            self.dock_panel_back(dock_id)
         self.settings.save_geometry(self.saveGeometry())
         self.settings.save_state(self.saveState())
         self.settings.set_graph_panels_state([panel.settings_state() for panel in self.graph_panels])
