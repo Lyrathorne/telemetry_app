@@ -162,6 +162,42 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual(tracker.completed_laps, [completed])
             self.assertEqual([lap.lap_number for lap in storage.load_laps() if lap.complete], [1])
 
+    def test_completed_lap_sector_snapshot_survives_next_lap_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.00, 0, 0))
+            tracker.process_sample(lap_sample(42.0, 42000, 0.33, 0, 1))
+            tracker.process_sample(lap_sample(85.0, 85000, 0.66, 0, 2))
+            finish = lap_sample(128.0, 20, 0.01, 1, 0)
+            finish.last_lap_time_ms = 128000
+
+            completed = tracker.process_sample(finish)
+            tracker.process_sample(lap_sample(128.02, 20, 0.02, 1, 0))
+
+            self.assertIsNotNone(completed)
+            self.assertIsNot(completed, tracker.active_lap)
+            self.assertEqual([sector.time_ms for sector in completed.sectors[:3]], [42000, 43000, 43000])
+            self.assertEqual([sector.time_ms for sector in tracker.completed_laps[0].sectors[:3]], [42000, 43000, 43000])
+            self.assertEqual([sector.time_ms for sector in storage.load_laps()[0].sectors[:3]], [42000, 43000, 43000])
+
+    def test_completed_lap_snapshot_is_not_mutated_by_active_lap_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.00, 0, 0))
+            tracker.process_sample(lap_sample(42.0, 42000, 0.33, 0, 1))
+            tracker.process_sample(lap_sample(85.0, 85000, 0.66, 0, 2))
+            finish = lap_sample(128.0, 20, 0.01, 1, 0)
+            finish.last_lap_time_ms = 128000
+            completed = tracker.process_sample(finish)
+
+            tracker.active_lap.sectors.append(SectorResult(sector_number=1, time_ms=20))
+
+            self.assertEqual([sector.time_ms for sector in completed.sectors[:3]], [42000, 43000, 43000])
+            self.assertEqual([sector.time_ms for sector in tracker.completed_laps[0].sectors[:3]], [42000, 43000, 43000])
+
     def test_acc_like_sector_splits_with_last_lap_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
@@ -194,9 +230,28 @@ class PanelAndLapTests(unittest.TestCase):
 
             self.assertIsNotNone(completed)
             self.assertEqual([sector.sector_number for sector in completed.sectors[:3]], [1, 2, 3])
-            self.assertEqual(completed.sectors[0].time_ms, 30000)
+            self.assertIsNone(completed.sectors[0].time_ms)
             self.assertIsNone(completed.sectors[1].time_ms)
-            self.assertEqual(completed.sectors[2].time_ms, 60000)
+            self.assertIsNone(completed.sectors[2].time_ms)
+
+    def test_tiny_sector_times_are_rejected_before_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.000, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(0.020, 20, 0.33, 0, 1))
+            tracker.process_sample(lap_sample(0.022, 22, 0.66, 0, 2))
+            finish = lap_sample(128.0, 20, 0.01, 1, 0)
+            finish.last_lap_time_ms = 128000
+
+            completed = tracker.process_sample(finish)
+            loaded = storage.load_laps()[0]
+
+            self.assertIsNotNone(completed)
+            self.assertEqual([sector.time_ms for sector in completed.sectors[:3]], [None, None, None])
+            self.assertEqual([sector.time_ms for sector in loaded.sectors[:3]], [None, None, None])
+            self.assertIn("Sector timing inconsistent", completed.notes)
 
     def test_normalized_f1_2021_timing_uses_shared_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -514,6 +569,25 @@ class PanelAndLapTests(unittest.TestCase):
         self.assertEqual(table.item(0, 2).text(), "00:31.284")
         self.assertEqual(table.item(0, 3).text(), "00:42.851")
         self.assertEqual(table.item(0, 4).text(), "—")
+        window.close()
+
+    def test_live_lap_table_keeps_completed_row_when_current_lap_updates(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("live_lap_timing")
+        completed = make_lap_with_sectors([42000, 43000, 43000], complete=True)
+        completed.lap_number = 1
+        active = make_lap_with_sectors([], complete=False)
+        active.lap_number = 2
+        active.samples = [lap_sample(128.02, 20, 0.02, 1, 0)]
+
+        window.handle_lap_completed(completed)
+        window.handle_lap_updated(active)
+        table = window.live_lap_tables[-1]
+
+        self.assertEqual(table.item(0, 2).text(), "00:42.000")
+        self.assertEqual(table.item(0, 3).text(), "00:43.000")
+        self.assertEqual(table.item(0, 4).text(), "00:43.000")
+        self.assertEqual(table.item(1, 0).text(), "2")
         window.close()
 
     def test_invalid_lap_and_incomplete_stop_are_saved(self) -> None:

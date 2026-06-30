@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -25,6 +26,7 @@ from telemetry.timing_status import (
 
 
 MIN_REASONABLE_LAP_MS = 10_000
+MIN_REASONABLE_SECTOR_MS = 1_000
 SECTOR_SUM_TOLERANCE_MS = 250
 MAX_SAVED_LAP_SAMPLES = 1000
 
@@ -417,20 +419,21 @@ class LapTracker(QObject):
         self._freeze_lap_graph(lap)
         lap.samples = downsample_samples(lap.samples, MAX_SAVED_LAP_SAMPLES)
         lap.raw_samples_recorded = True
-        self.repository.add_completed_lap(lap)
-        self._recalculate_sector_timing_statuses(lap)
-        self.last_event = f"Lap completed: lap={lap.lap_number} time_ms={lap.lap_time_ms}"
+        completed_snapshot = deepcopy(lap)
+        self.repository.add_completed_lap(completed_snapshot)
+        self._recalculate_sector_timing_statuses(completed_snapshot)
+        self.last_event = f"Lap completed: lap={completed_snapshot.lap_number} time_ms={completed_snapshot.lap_time_ms}"
         self._logger.info(
             "[Timing] Lap completed: lap=%s lap_time=%s s1=%s s2=%s s3=%s",
-            lap.lap_number,
-            lap.lap_time_ms,
-            sector_time(lap, 1),
-            sector_time(lap, 2),
-            sector_time(lap, 3),
+            completed_snapshot.lap_number,
+            completed_snapshot.lap_time_ms,
+            sector_time(completed_snapshot, 1),
+            sector_time(completed_snapshot, 2),
+            sector_time(completed_snapshot, 3),
         )
         self._set_timing_state(TimingState.LAP_COMPLETED, self.last_event)
-        self._save_lap(lap)
-        return lap
+        self._save_lap(completed_snapshot)
+        return completed_snapshot
 
     def _finalize_partial_lap(self, sample: TelemetrySample) -> None:
         if self.active_lap is None:
@@ -672,12 +675,19 @@ class LapTracker(QObject):
             return
         first_three = sectors[:3]
         sector_times = [sector.time_ms for sector in first_three]
-        if any(time_ms is None or time_ms <= 0 for time_ms in sector_times):
+        if any(time_ms is None or time_ms < MIN_REASONABLE_SECTOR_MS for time_ms in sector_times):
+            self._logger.warning(
+                "Rejecting unrealistic sector timing: lap_id=%s lap_time_ms=%s sectors=%s",
+                lap.id,
+                lap.lap_time_ms,
+                sector_times,
+            )
             lap.notes = append_note(lap.notes, "Sector timing inconsistent; sector values unavailable")
             for sector in first_three:
-                if sector.time_ms is None or sector.time_ms <= 0:
-                    sector.valid = False
-                    sector.timing_source = "unavailable"
+                sector.time_ms = None
+                sector.valid = False
+                sector.comparison_status = TIMING_STATUS_UNAVAILABLE
+                sector.timing_source = "unavailable"
             return
         sector_sum_ms = sum(int(time_ms) for time_ms in sector_times if time_ms is not None)
         if abs(sector_sum_ms - lap.lap_time_ms) <= SECTOR_SUM_TOLERANCE_MS:
