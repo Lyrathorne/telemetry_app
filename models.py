@@ -26,9 +26,11 @@ class TelemetrySample:
     current_split_time_ms: int | None = None
     last_sector_time_ms: int | None = None
     last_lap_time_ms: int | None = None
+    best_lap_time_ms: int | None = None
     lap_valid: bool | None = None
     invalid_lap: bool | None = None
     in_pit: bool | None = None
+    in_pit_lane: bool | None = None
     clutch_percent: float | None = None
     steering: float | None = None
 

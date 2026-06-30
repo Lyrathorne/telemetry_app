@@ -134,6 +134,28 @@ class LapStorage:
             )
             connection.commit()
 
+    def update_session_metadata(
+        self,
+        session_id: str,
+        game: str | None = None,
+        track: str | None = None,
+        car: str | None = None,
+        driver_name: str | None = None,
+    ) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """
+                UPDATE telemetry_sessions
+                SET game = COALESCE(NULLIF(?, ''), game),
+                    track = COALESCE(NULLIF(?, ''), track),
+                    car = COALESCE(NULLIF(?, ''), car),
+                    driver_name = COALESCE(NULLIF(?, ''), driver_name)
+                WHERE id = ?
+                """,
+                (game, track, car, driver_name, session_id),
+            )
+            connection.commit()
+
     def save_lap(self, lap: LapResult) -> None:
         with closing(self.connect()) as connection:
             connection.execute("BEGIN")

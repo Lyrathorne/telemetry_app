@@ -17,6 +17,10 @@ from telemetry.assetto_corsa_competizione import (
     GRAPHICS_NORMALIZED_POSITION_OFFSET,
     GRAPHICS_SPLIT_TEXT_OFFSET,
     GRAPHICS_HEADER_FORMAT,
+    GRAPHICS_MAP_SIZE,
+    MAP_NAMES,
+    PHYSICS_MAP_SIZE,
+    STATIC_MAP_SIZE,
     parse_acc_time_text,
     read_acc_graphics,
 )
@@ -130,6 +134,30 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(graphics["current_split_time_ms"], 74135)
         self.assertEqual(graphics["last_sector_time_ms"], 42851)
         self.assertEqual(graphics["normalized_track_position"], 0.75)
+
+    def test_acc_shared_memory_pages_are_defined_independently(self) -> None:
+        self.assertEqual(MAP_NAMES["physics"], "Local\\acpmf_physics")
+        self.assertEqual(MAP_NAMES["graphics"], "Local\\acpmf_graphics")
+        self.assertEqual(MAP_NAMES["static"], "Local\\acpmf_static")
+        self.assertGreaterEqual(PHYSICS_MAP_SIZE, 800)
+        self.assertGreaterEqual(GRAPHICS_MAP_SIZE, 1588)
+        self.assertGreaterEqual(STATIC_MAP_SIZE, 784)
+
+    def test_acc_negative_timing_sentinels_become_none(self) -> None:
+        packet = bytearray(256)
+        struct.pack_into(GRAPHICS_HEADER_FORMAT, packet, 0, 10, 2, 0)
+        struct.pack_into("=i", packet, GRAPHICS_CURRENT_TIME_OFFSET, -1)
+        struct.pack_into("=i", packet, GRAPHICS_LAST_TIME_OFFSET, -1)
+        struct.pack_into("=i", packet, GRAPHICS_LAST_SECTOR_TIME_OFFSET, -1)
+        struct.pack_into("=i", packet, GRAPHICS_CURRENT_SECTOR_OFFSET, 7)
+        struct.pack_into("=i", packet, GRAPHICS_COMPLETED_LAPS_OFFSET, 0)
+
+        graphics = read_acc_graphics(BytesMapping(packet))
+
+        self.assertIsNone(graphics["current_lap_time_ms"])
+        self.assertIsNone(graphics["last_lap_time_ms"])
+        self.assertIsNone(graphics["last_sector_time_ms"])
+        self.assertIsNone(graphics["current_sector_index"])
 
     def test_acc_time_text_parser(self) -> None:
         self.assertEqual(parse_acc_time_text("31.284"), 31284)

@@ -150,6 +150,8 @@ class AccTelemetrySource(TelemetrySource):
                 "acc_current_lap_time_ms": graphics.get("current_lap_time_ms"),
                 "acc_raw_last_lap_time_ms": graphics.get("raw_last_lap_time_ms"),
                 "acc_last_lap_time_ms": graphics.get("last_lap_time_ms"),
+                "acc_raw_best_lap_time_ms": graphics.get("raw_best_lap_time_ms"),
+                "acc_best_lap_time_ms": graphics.get("best_lap_time_ms"),
                 "acc_split_ms": graphics.get("current_split_time_ms"),
                 "acc_last_sector_time_ms": graphics.get("last_sector_time_ms"),
                 "acc_completed_laps": graphics.get("completed_laps"),
@@ -186,6 +188,7 @@ class AccTelemetrySource(TelemetrySource):
                 timestamp=time.time(),
                 current_lap_time_ms=graphics.get("current_lap_time_ms"),
                 last_lap_time_ms=graphics.get("last_lap_time_ms"),
+                best_lap_time_ms=graphics.get("best_lap_time_ms"),
                 completed_laps=graphics.get("completed_laps"),
                 current_sector_index=graphics.get("current_sector_index"),
                 current_split_time_ms=graphics.get("current_split_time_ms"),
@@ -193,6 +196,8 @@ class AccTelemetrySource(TelemetrySource):
                 lap_distance=graphics.get("distance_traveled_m"),
                 normalized_track_position=graphics.get("normalized_track_position"),
                 in_pit=graphics.get("is_in_pit"),
+                invalid_lap=False,
+                lap_valid=True,
             )
         )
 
@@ -332,8 +337,8 @@ def read_float32(mapping: NamedSharedMemory, offset: int) -> float:
     return float(struct.unpack("=f", mapping.read_bytes(offset, 4))[0])
 
 
-def positive_time_or_none(value: int) -> int | None:
-    return int(value) if value > 0 else None
+def positive_time_or_none(value: int | None) -> int | None:
+    return int(value) if value is not None and value > 0 else None
 
 
 def first_time_or_none(*values: int | None) -> int | None:

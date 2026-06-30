@@ -19,7 +19,7 @@ from telemetry.lap_comparison import (
     time_delta,
 )
 from telemetry.lap_storage import LapStorage
-from telemetry.lap_tracker import LapTracker
+from telemetry.lap_tracker import TimingState, LapTracker
 from ui.main_window import MainWindow
 
 
@@ -53,6 +53,7 @@ def lap_sample(
         lap_time=lap_ms / 1000.0,
         current_lap_time_ms=lap_ms,
         last_lap_time_ms=lap_ms if completed_laps else None,
+        best_lap_time_ms=lap_ms if completed_laps else None,
         completed_laps=completed_laps,
         current_sector_index=sector,
         current_split_time_ms=split_ms,
@@ -181,6 +182,78 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual([sector.sector_number for sector in tracker.active_lap.sectors], [2])
             self.assertIsNone(tracker.active_lap.sectors[0].time_ms)
             self.assertEqual(tracker.active_lap.notes, "Started mid-lap")
+            self.assertEqual(tracker.timing_state, TimingState.PARTIAL_LAP)
+
+    def test_first_finish_after_mid_lap_connection_starts_full_lap_without_saving_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(50.0, 50000, 0.50, 0, 1))
+            finish = lap_sample(90.0, 100, 0.01, 1, 0, last_sector_ms=30000)
+            finish.last_lap_time_ms = 90000
+            result = tracker.process_sample(finish)
+
+            self.assertIsNone(result)
+            self.assertEqual(len(tracker.completed_laps), 0)
+            self.assertEqual(len(storage.load_laps()), 0)
+            self.assertIsNotNone(tracker.active_lap)
+            self.assertEqual(tracker.timing_state, TimingState.TRACKING_LAP)
+
+    def test_completed_lap_enters_memory_before_persistence_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(31.0, 31000, 0.3, 0, 1))
+            tracker.process_sample(lap_sample(70.0, 70000, 0.7, 0, 2))
+            finish = lap_sample(100.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 100000
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            self.assertIs(tracker.repository.get_lap(completed.id), completed)
+            self.assertEqual(tracker.repository.get_session_laps(tracker.session_id), [completed])
+            self.assertEqual(tracker.storage_status.completed_laps_in_memory, 1)
+            self.assertEqual(tracker.storage_status.last_save_result, "Lap saved successfully")
+
+    def test_pit_sample_does_not_create_completed_lap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            pit_sample = lap_sample(20.0, 20000, 0.25, 0, 0)
+            pit_sample.in_pit = True
+            result = tracker.process_sample(pit_sample)
+
+            self.assertIsNone(result)
+            self.assertEqual(tracker.timing_state, TimingState.IN_PITS)
+            self.assertEqual(len(tracker.completed_laps), 0)
+
+    def test_session_counter_reset_is_not_lap_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 2, 0))
+            result = tracker.process_sample(lap_sample(1.0, 1000, 0.01, 0, 0))
+
+            self.assertIsNone(result)
+            self.assertEqual(len(tracker.completed_laps), 0)
+            self.assertEqual(tracker.timing_state, TimingState.WAITING_FOR_SESSION)
+
+    def test_timing_tracker_is_alive_without_sector_panel(self) -> None:
+        window = MainWindow(reset_layout=True)
+        initial_tables = len(window.sector_timing_tables)
+        sample = lap_sample(0.0, 0, 0.0, 0, 0)
+        window.lap_tracker.start_session("ACC", "Track", "Car")
+        window.lap_tracker.process_sample(sample)
+
+        self.assertEqual(len(window.sector_timing_tables), initial_tables)
+        self.assertIsNotNone(window.lap_tracker.active_lap)
+        self.assertEqual(window.lap_tracker.timing_state, TimingState.TRACKING_LAP)
+        window.close()
 
     def test_live_lap_table_updates_sector_cells(self) -> None:
         window = MainWindow(reset_layout=True)

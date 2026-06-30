@@ -101,6 +101,8 @@ class MainWindow(QMainWindow):
         self._logger = logging.getLogger(__name__)
         self.lap_tracker.lap_completed.connect(self.handle_lap_completed)
         self.lap_tracker.lap_updated.connect(self.handle_lap_updated)
+        self.lap_tracker.timing_state_changed.connect(self.handle_timing_state)
+        self.lap_tracker.diagnostics_changed.connect(self.handle_diagnostics)
         self.lap_tracker.storage_error.connect(
             lambda message: self._logger.error("Lap storage error: %s", message)
         )
@@ -505,11 +507,26 @@ class MainWindow(QMainWindow):
             "acc_current_lap_time_ms": "ACC current lap:",
             "acc_raw_last_lap_time_ms": "Raw last lap:",
             "acc_last_lap_time_ms": "ACC last lap:",
+            "acc_raw_best_lap_time_ms": "Raw best lap:",
+            "acc_best_lap_time_ms": "ACC best lap:",
             "acc_split_ms": "ACC split:",
             "acc_last_sector_time_ms": "ACC last sector:",
             "acc_completed_laps": "ACC completed laps:",
             "acc_normalized_position": "ACC normalized position:",
             "acc_in_pit": "ACC pit:",
+            "timing_state": "Timing state:",
+            "timing_waiting_reason": "Timing reason:",
+            "current_session_id": "Current session:",
+            "current_active_lap_id": "Active lap:",
+            "active_lap_samples": "Active lap samples:",
+            "completed_laps_in_memory": "Laps in memory:",
+            "database_path": "Database path:",
+            "database_available": "Database available:",
+            "completed_laps_on_disk": "Laps on disk:",
+            "last_save_result": "Last save:",
+            "last_save_error": "Save error:",
+            "pending_storage_operations": "Pending saves:",
+            "last_timing_event": "Last timing event:",
         }.items():
             label = QLabel("--")
             label.setWordWrap(True)
@@ -972,7 +989,7 @@ class MainWindow(QMainWindow):
             labels["sector"].setText("--" if sample.current_sector_index is None else f"S{sample.current_sector_index + 1}")
             labels["lap_time"].setText(format_time_ms(sample.current_lap_time_ms))
             labels["last_lap"].setText(format_time_ms(sample.last_lap_time_ms))
-            labels["best_lap"].setText("--")
+            labels["best_lap"].setText(format_time_ms(sample.best_lap_time_ms))
             labels["delta"].setText("Unavailable")
 
     def _update_live_lap_template_panels(self, sample: TelemetrySample) -> None:
@@ -998,7 +1015,7 @@ class MainWindow(QMainWindow):
         current = sample.current_sector_index
         for table in self.sector_timing_tables:
             for row in range(table.rowCount()):
-                status = "Current" if current == row else "Waiting"
+                status = "Current" if current == row else self.lap_tracker.waiting_reason
                 time_value = "Running" if current == row else "--"
                 for column, value in enumerate([f"S{row + 1}", time_value, "Unavailable", status]):
                     item = table.item(row, column)
@@ -1035,6 +1052,18 @@ class MainWindow(QMainWindow):
                 self.common_labels["updates_per_second"].setText(text or "--")
             if key == "last_error":
                 self.common_labels["latest_error"].setText(text or "--")
+
+    def handle_timing_state(self, state: str, reason: str) -> None:
+        text = reason or state
+        if hasattr(self, "lap_labels"):
+            self.lap_labels["timing_scope"].setText(text)
+        for table in self.sector_timing_tables:
+            for row in range(table.rowCount()):
+                item = table.item(row, 3)
+                if item is None:
+                    table.setItem(row, 3, QTableWidgetItem(text))
+                elif item.text() in {"Waiting", "--"} or state in {"WAITING_FOR_LAP", "WAITING_FOR_SESSION", "IN_PITS"}:
+                    item.setText(text)
 
     def import_telemetry(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
@@ -1157,6 +1186,8 @@ class MainWindow(QMainWindow):
             sector = current_sample.current_sector_index
             self.lap_labels["current_sector"].setText("--" if sector is None else str(int(sector) + 1))
             self.lap_labels["current_lap_time"].setText(format_time_ms(current_sample.current_lap_time_ms))
+            self.lap_labels["last_lap"].setText(format_time_ms(current_sample.last_lap_time_ms))
+            self.lap_labels["best_lap"].setText(format_time_ms(current_sample.best_lap_time_ms))
         self._update_live_lap_tables_from_lap(lap, complete=False)
         self._update_sector_tables_from_lap(lap)
 
