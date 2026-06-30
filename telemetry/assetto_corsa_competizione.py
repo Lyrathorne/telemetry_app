@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, QTimer
 from models import TelemetrySample
 from telemetry.base import SourceState, TelemetrySource
 from telemetry.windows_shared_memory import NamedSharedMemory
+from telemetry.time_utils import parse_racing_time_to_ms
 
 
 ACC_OFF = 0
@@ -349,29 +350,7 @@ def first_time_or_none(*values: int | None) -> int | None:
 
 
 def parse_acc_time_text(value: str) -> int | None:
-    text = value.strip().replace("+", "").replace("-", "")
-    if not text or text in {"--", "-:--.---"}:
-        return None
-    try:
-        parts = text.split(":")
-        if len(parts) > 3:
-            return None
-        if len(parts) == 3 and "." not in parts[2] and parts[2].isdigit() and len(parts[2]) <= 3:
-            minutes = int(parts[0])
-            seconds = int(parts[1])
-            millis = int(parts[2].ljust(3, "0"))
-            if seconds >= 60:
-                return None
-            return ((minutes * 60) + seconds) * 1000 + millis
-        seconds_text = parts[-1]
-        seconds = float(seconds_text)
-        if seconds >= 60:
-            return None
-        minutes = int(parts[-2]) if len(parts) >= 2 else 0
-        hours = int(parts[-3]) if len(parts) == 3 else 0
-        return int(round(((hours * 60 + minutes) * 60 + seconds) * 1000))
-    except (ValueError, IndexError):
-        return None
+    return parse_racing_time_to_ms(value)
 
 
 def normalize_acc_gear(raw_gear: int) -> int:

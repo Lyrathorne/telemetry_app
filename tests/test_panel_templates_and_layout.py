@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from app.settings import AppSettings
-from models import TelemetrySample
+from models import LapResult, SectorResult, TelemetrySample
 from ui.graph_panel import GraphPanel
 from ui.main_window import MainWindow
 
@@ -90,6 +90,43 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
             for row in range(table.rowCount()):
                 values = [table.item(row, column).text() for column in range(table.columnCount()) if table.item(row, column)]
                 self.assertNotEqual(values, headers)
+        window.close()
+
+    def test_telemetry_source_is_dock_not_central_header(self) -> None:
+        window = MainWindow(reset_layout=True)
+        self.assertIn("telemetry_source", window.docks)
+        self.assertIs(window.docks["telemetry_source"].widget(), window.source_combo.parentWidget().parentWidget())
+        self.assertNotEqual(window.centralWidget(), window.docks["telemetry_source"].widget())
+        window.close()
+
+    def test_completed_lap_pedal_overlay_panel_opens(self) -> None:
+        window = MainWindow(reset_layout=True)
+        lap = LapResult(
+            lap_number=7,
+            lap_time_ms=100000,
+            valid=True,
+            complete=True,
+            sectors=[
+                SectorResult(1, time_ms=30000),
+                SectorResult(2, time_ms=30000),
+                SectorResult(3, time_ms=40000),
+            ],
+        )
+        for index, progress in enumerate((0.0, 0.5, 1.0)):
+            lap.samples.append(
+                TelemetrySample(
+                    timestamp=float(index),
+                    current_lap_time_ms=index * 50000,
+                    normalized_track_position=progress,
+                    throttle_percent=80.0,
+                    brake_percent=10.0 * index,
+                )
+            )
+
+        widget = window.open_lap_pedal_overlay(lap)
+
+        self.assertIsNotNone(widget)
+        self.assertIn(widget, window.panel_widgets.values())
         window.close()
 
     def test_dynamic_templates_get_unique_ids(self) -> None:

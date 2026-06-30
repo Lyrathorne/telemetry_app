@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from models import LapResult, SectorResult, TelemetrySample
+from models import LapResult, ReferenceLap, SectorResult, TelemetryPoint, TelemetrySample
+from telemetry.lap_delta import completed_lap_delta_ms, format_delta_ms
 from telemetry.lap_storage import LapStorage
 from telemetry.reference_importer import import_reference_lap
 from telemetry.sector_feedback import sector_feedback
@@ -74,6 +75,60 @@ class ReferenceOverlayTests(unittest.TestCase):
             self.assertEqual(loaded.player_name, "Reference Driver")
             self.assertEqual(loaded.lap_time_ms, 99500)
             self.assertEqual(len(loaded.telemetry_points), 3)
+
+    def test_racing_time_string_import_is_minutes_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "reference.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "game": "ACC",
+                        "track": "monza",
+                        "car": "porsche_911_gt3",
+                        "lap_time": "2:08.000",
+                        "telemetry_points": [
+                            {"lap_progress": 0.0, "speed": 100},
+                            {"lap_progress": 1.0, "speed": 120},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            reference = import_reference_lap(path)
+            own = LapResult(lap_time_ms=129000, valid=True, complete=True, track="monza", car="porsche_911_gt3")
+            best = LapResult(lap_time_ms=128000, valid=True, complete=True, track="monza", car="porsche_911_gt3")
+
+            self.assertEqual(reference.lap_time_ms, 128000)
+            self.assertEqual(format_delta_ms(completed_lap_delta_ms(own, [own, best])), "+1.000")
+
+    def test_reference_matching_requires_same_track_and_car(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            storage.save_reference_lap(
+                ReferenceLap(
+                    game="ACC",
+                    track_id="monza",
+                    car_id="porsche_911_gt3",
+                    lap_time_ms=100000,
+                    telemetry_points=[TelemetryPoint(lap_progress=0.0), TelemetryPoint(lap_progress=1.0)],
+                )
+            )
+
+            self.assertIsNotNone(storage.best_reference_lap("ACC", "monza", "porsche_911_gt3"))
+            self.assertIsNone(storage.best_reference_lap("ACC", "monza", "bmw_m4_gt3"))
+            self.assertIsNone(storage.best_reference_lap("ACC", "spa", "porsche_911_gt3"))
+
+    def test_reference_with_lap_time_only_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            storage.save_reference_lap(
+                ReferenceLap(game="ACC", track_id="monza", car_id="porsche_911_gt3", lap_time_ms=100000)
+            )
+
+            reference = storage.best_reference_lap("ACC", "monza", "porsche_911_gt3")
+
+            self.assertIsNotNone(reference)
+            self.assertEqual(reference.telemetry_points, [])
 
     def test_overlay_aligns_two_laps_by_progress(self) -> None:
         main = lap_with_samples()

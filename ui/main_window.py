@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self.session_history_tables: list[tuple[QTableWidget, QTableWidget]] = []
         self.active_reference_lap: ReferenceLap | None = None
         self.reference_overlay_enabled = True
+        self._reference_panel_key = ""
         self.graph_counter = 0
         self.recording_samples: list[TelemetrySample] = []
         self.is_recording = False
@@ -340,11 +341,16 @@ class MainWindow(QMainWindow):
         self.dashboard_workspace.detach_panel_requested.connect(self.detach_panel)
         self.dashboard_workspace.close_panel_requested.connect(self.close_panel)
         self.dashboard_workspace.compact_panel_requested.connect(self.set_panel_compact_mode)
-        central_layout.addWidget(source_controls)
         central_layout.addWidget(self.dashboard_workspace, stretch=1)
         central.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         central.customContextMenuRequested.connect(lambda position: self.add_panel_menu.exec(central.mapToGlobal(position)))
         self.setCentralWidget(central)
+        self.source_controls_dock = self._add_dock(
+            "telemetry_source",
+            "Telemetry Source",
+            source_controls,
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+        )
         self._add_dock("live_telemetry", "Live Telemetry", self._create_telemetry_widget(), Qt.DockWidgetArea.LeftDockWidgetArea)
         self._add_dock("source_status", "Source Status", self._create_common_status_widget(), Qt.DockWidgetArea.LeftDockWidgetArea)
         self.connection_diagnostics_dock = self._add_dock(
@@ -1329,6 +1335,34 @@ class MainWindow(QMainWindow):
             self.status_label.setText(
                 f"Reference: {reference.player_name or reference.source} {format_time_ms(reference.lap_time_ms)}"
             )
+            self._show_reference_summary_panel(reference)
+
+    def _show_reference_summary_panel(self, reference: ReferenceLap) -> None:
+        key = reference.id
+        if self._reference_panel_key == key:
+            return
+        self._reference_panel_key = key
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        title = QLabel(f"Reference: {reference.player_name or reference.source}")
+        detail = QLabel(
+            " | ".join(
+                [
+                    reference.game or "--",
+                    reference.track_display_name or display_track_name(reference.track_id),
+                    reference.car_display_name or display_car_name(reference.car_id),
+                    format_time_ms(reference.lap_time_ms),
+                    "Telemetry available" if reference.telemetry_points else "Lap time only",
+                ]
+            )
+        )
+        title.setWordWrap(True)
+        detail.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        panel_id = self._next_panel_id("reference_summary")
+        template = PanelTemplate(panel_id, "Active reference", "reference_summary", "Best matching local reference lap.")
+        self._register_workspace_panel(panel_id, template, widget)
 
     def _show_sector_feedback(self, lap: LapResult) -> None:
         reference = self.active_reference_lap
@@ -1491,6 +1525,63 @@ class MainWindow(QMainWindow):
         self._register_workspace_panel(panel_id, template, panel)
         return panel
 
+    def open_lap_pedal_overlay(self, lap: LapResult, comparison: LapResult | ReferenceLap | None = None) -> QWidget | None:
+        if not lap.samples:
+            return None
+        comparison = comparison or self.active_reference_lap
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        sectors = {sector.sector_number: sector for sector in lap.sectors}
+        summary = QLabel(
+            " | ".join(
+                [
+                    f"Lap {lap.lap_number}",
+                    f"Time {format_time_ms(lap.lap_time_ms)}",
+                    f"S1 {format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None)}",
+                    f"S2 {format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None)}",
+                    f"S3 {format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None)}",
+                    f"Delta {format_delta_ms(completed_lap_delta_ms(lap, self.saved_laps), best_label=True)}",
+                ]
+            )
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        if pg is None:
+            layout.addWidget(QLabel("pyqtgraph is not available."))
+        else:
+            plot = pg.PlotWidget()
+            plot.setLabel("left", "Pedals", units="%")
+            plot.setLabel("bottom", "Lap distance / progress")
+            plot.addLegend()
+            overlay = []
+            if comparison is not None:
+                from telemetry.telemetry_overlay import build_lap_overlay
+
+                overlay = build_lap_overlay(lap, comparison, metrics=["throttle_percent", "brake_percent"])
+            if overlay:
+                for series in overlay:
+                    own_pen = pg.mkPen("#1f77b4" if series.metric == "throttle_percent" else "#d62728", width=2)
+                    ref_pen = pg.mkPen("#8ecaff" if series.metric == "throttle_percent" else "#ff9a9a", width=1, style=Qt.PenStyle.DashLine)
+                    label = "Throttle" if series.metric == "throttle_percent" else "Brake"
+                    plot.plot(series.axis, series.main, pen=own_pen, name=f"Own {label}")
+                    plot.plot(series.axis, series.comparison, pen=ref_pen, name=f"Ref {label}")
+            else:
+                from telemetry.telemetry_points import lap_to_points, point_axis
+
+                points = lap_to_points(lap)
+                axes = [point_axis(point) for point in points]
+                if any(axis is not None for axis in axes):
+                    base = next(axis for axis in axes if axis is not None)
+                    x = [0.0 if axis is None else float(axis) - float(base) for axis in axes]
+                    plot.plot(x, [point.throttle_percent or 0.0 for point in points], pen=pg.mkPen("#1f77b4", width=2), name="Throttle")
+                    plot.plot(x, [point.brake_percent or 0.0 for point in points], pen=pg.mkPen("#d62728", width=2), name="Brake")
+            layout.addWidget(plot)
+        panel_id = self._next_panel_id("lap_pedal_overlay")
+        title = f"Lap {lap.lap_number} pedals"
+        template = PanelTemplate(panel_id, title, "lap_pedal_overlay", "Frozen completed lap pedal overlay.")
+        self._register_workspace_panel(panel_id, template, widget)
+        return widget
+
     def compare_selected_laps(self) -> None:
         laps = self.selected_laps()
         if len(laps) < 2:
@@ -1519,6 +1610,7 @@ class MainWindow(QMainWindow):
         delta_x, delta_y = time_delta(laps[0], laps[1])
         if delta_x.size and delta_y.size:
             self.comparison_plot.plot(delta_x, delta_y, pen=pg.mkPen("#ffffff", width=1), name="Time delta: comparison - reference")
+        self.open_lap_pedal_overlay(laps[0], laps[1])
 
     def delete_selected_lap(self) -> None:
         laps = self.selected_laps()

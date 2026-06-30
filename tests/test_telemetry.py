@@ -162,6 +162,10 @@ class TelemetryTests(unittest.TestCase):
     def test_acc_time_text_parser(self) -> None:
         self.assertEqual(parse_acc_time_text("31.284"), 31284)
         self.assertEqual(parse_acc_time_text("01:31.532"), 91532)
+        self.assertEqual(parse_acc_time_text("1:32.456"), 92456)
+        self.assertEqual(parse_acc_time_text("2:08.000"), 128000)
+        self.assertEqual(parse_acc_time_text("0:59.999"), 59999)
+        self.assertEqual(parse_acc_time_text("12:34.567"), 754567)
         self.assertEqual(parse_acc_time_text("1:02:03.004"), 3723004)
         self.assertEqual(parse_acc_time_text("2:10.405"), 130405)
         self.assertEqual(parse_acc_time_text("2:10:405"), 130405)

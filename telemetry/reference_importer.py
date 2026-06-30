@@ -7,6 +7,7 @@ from pathlib import Path
 from models import ReferenceLap, TelemetryPoint
 from telemetry.display_names import display_car_name, display_track_name
 from telemetry.importer import TelemetryImportError, normalize_control, parse_number, read_text_with_fallbacks
+from telemetry.time_utils import parse_racing_time_to_ms
 
 
 REFERENCE_ALIASES = {
@@ -120,7 +121,4 @@ def optional_int(value) -> int | None:
 
 
 def optional_lap_time_ms(value) -> int | None:
-    if value is None or value == "":
-        return None
-    numeric = float(value)
-    return int(numeric if numeric > 1000 else numeric * 1000)
+    return parse_racing_time_to_ms(value)
