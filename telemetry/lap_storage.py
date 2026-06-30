@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 from app.paths import data_dir, ensure_user_directories
@@ -10,6 +12,7 @@ from models import LapResult, SectorResult, SessionSummary, TelemetrySample
 
 
 SCHEMA_VERSION = 3
+LOGGER = logging.getLogger(__name__)
 
 
 class LapStorage:
@@ -21,11 +24,23 @@ class LapStorage:
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            return connection
+        except sqlite3.DatabaseError:
+            connection.close()
+            raise
 
     def _initialize(self) -> None:
+        try:
+            self._initialize_schema()
+        except sqlite3.DatabaseError as error:
+            LOGGER.warning("Lap database is corrupt; moving it aside and recreating: %s", error)
+            self._move_corrupt_database()
+            self._initialize_schema()
+
+    def _initialize_schema(self) -> None:
         with closing(self.connect()) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             connection.executescript(
@@ -119,6 +134,16 @@ class LapStorage:
             if version < SCHEMA_VERSION:
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
+
+    def _move_corrupt_database(self) -> None:
+        if not self.path.exists():
+            return
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        corrupt_path = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        try:
+            self.path.replace(corrupt_path)
+        except OSError:
+            self.path.unlink(missing_ok=True)
 
     def ensure_session(
         self,
@@ -237,67 +262,93 @@ class LapStorage:
                 ],
             )
             connection.commit()
+            LOGGER.info(
+                "[SessionStorage] Saved session: track=%s car=%s laps=%s",
+                lap.track,
+                lap.car,
+                self._session_lap_count(connection, lap.session_id),
+            )
 
     def load_laps(self) -> list[LapResult]:
-        with closing(self.connect()) as connection:
-            lap_rows = connection.execute(
-                """
-                SELECT id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
-                       car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded
-                FROM laps
-                ORDER BY started_at DESC, lap_number DESC
-                """
-            ).fetchall()
-            laps: list[LapResult] = []
-            for row in lap_rows:
-                lap_id = row[0]
-                sectors = [
-                    SectorResult(
-                        sector_number=sector_row[0],
-                        start_distance_m=sector_row[1],
-                        end_distance_m=sector_row[2],
-                        time_ms=sector_row[3],
-                        valid=bool(sector_row[4]),
-                        comparison_status=sector_row[5],
-                        timing_source=sector_row[6] or "unavailable",
-                    )
-                    for sector_row in connection.execute(
-                        """
-                        SELECT sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status, timing_source
-                        FROM sectors WHERE lap_id = ? ORDER BY sector_number
-                        """,
-                        (lap_id,),
-                    )
-                ]
-                samples = [
-                    sample_from_json(sample_row_data[0])
-                    for sample_row_data in connection.execute(
-                        "SELECT raw_json FROM lap_samples WHERE lap_id = ? ORDER BY sample_index",
-                        (lap_id,),
-                    )
-                ]
-                laps.append(
-                    LapResult(
-                        id=lap_id,
-                        session_id=row[1],
-                        lap_number=row[2],
-                        lap_time_ms=row[3],
-                        valid=bool(row[4]),
-                        complete=bool(row[5]),
-                        game=row[6],
-                        track=row[7],
-                        car=row[8],
-                        driver_name=row[9],
-                        started_at=row[10],
-                        completed_at=row[11],
-                        notes=row[12] or "",
-                        fully_observed=bool(row[13]),
-                        raw_samples_recorded=bool(row[14]),
-                        sectors=sectors,
-                        samples=samples,
-                    )
+        try:
+            connection_context = closing(self.connect())
+        except sqlite3.DatabaseError:
+            LOGGER.warning("Lap database could not be opened", exc_info=True)
+            return []
+        with connection_context as connection:
+            try:
+                return self._load_laps_from_connection(connection)
+            except (sqlite3.DatabaseError, json.JSONDecodeError, TypeError) as error:
+                LOGGER.warning("Lap database load failed; returning empty lap list: %s", error)
+                return []
+
+    def _load_laps_from_connection(self, connection: sqlite3.Connection) -> list[LapResult]:
+        lap_rows = connection.execute(
+            """
+            SELECT id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
+                   car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded
+            FROM laps
+            ORDER BY started_at DESC, lap_number DESC
+            """
+        ).fetchall()
+        laps: list[LapResult] = []
+        for row in lap_rows:
+            lap_id = row[0]
+            sectors = [
+                SectorResult(
+                    sector_number=sector_row[0],
+                    start_distance_m=sector_row[1],
+                    end_distance_m=sector_row[2],
+                    time_ms=sector_row[3],
+                    valid=bool(sector_row[4]),
+                    comparison_status=sector_row[5],
+                    timing_source=sector_row[6] or "unavailable",
                 )
-            return laps
+                for sector_row in connection.execute(
+                    """
+                    SELECT sector_number, start_distance_m, end_distance_m, time_ms, valid, comparison_status, timing_source
+                    FROM sectors WHERE lap_id = ? ORDER BY sector_number
+                    """,
+                    (lap_id,),
+                )
+            ]
+            samples = [
+                sample_from_json(sample_row_data[0])
+                for sample_row_data in connection.execute(
+                    "SELECT raw_json FROM lap_samples WHERE lap_id = ? ORDER BY sample_index",
+                    (lap_id,),
+                )
+            ]
+            laps.append(
+                LapResult(
+                    id=lap_id,
+                    session_id=row[1],
+                    lap_number=row[2],
+                    lap_time_ms=row[3],
+                    valid=bool(row[4]),
+                    complete=bool(row[5]),
+                    game=row[6],
+                    track=row[7],
+                    car=row[8],
+                    driver_name=row[9],
+                    started_at=row[10],
+                    completed_at=row[11],
+                    notes=row[12] or "",
+                    fully_observed=bool(row[13]),
+                    raw_samples_recorded=bool(row[14]),
+                    sectors=sectors,
+                    samples=samples,
+                )
+            )
+        return laps
+
+    @staticmethod
+    def _session_lap_count(connection: sqlite3.Connection, session_id: str) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM laps WHERE session_id = ? AND complete = 1",
+            (session_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
 
     def load_session_summaries(self) -> list[SessionSummary]:
         try:

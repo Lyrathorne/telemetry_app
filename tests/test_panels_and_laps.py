@@ -145,6 +145,23 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0].lap_time_ms, 60000)
 
+    def test_completed_lap_history_survives_new_lap_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.00, 0, 0))
+            tracker.process_sample(lap_sample(20.0, 20000, 0.33, 0, 1))
+            tracker.process_sample(lap_sample(40.0, 40000, 0.66, 0, 2))
+            finish = lap_sample(60.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 60000
+            completed = tracker.process_sample(finish)
+            tracker.process_sample(lap_sample(60.2, 200, 0.02, 1, 0))
+
+            self.assertIsNotNone(completed)
+            self.assertEqual(tracker.completed_laps, [completed])
+            self.assertEqual([lap.lap_number for lap in storage.load_laps() if lap.complete], [1])
+
     def test_acc_like_sector_splits_with_last_lap_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
@@ -163,6 +180,49 @@ class PanelAndLapTests(unittest.TestCase):
             loaded = storage.load_laps()
             self.assertEqual([sector.time_ms for sector in loaded[0].sectors], [31284, 42851, 32807])
             self.assertEqual(loaded[0].sectors[2].timing_source, "acc_direct_sector")
+
+    def test_completed_lap_always_has_three_sector_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = LapTracker(LapStorage(Path(tmpdir) / "laps.sqlite3"))
+            tracker.start_session("ACC", "Track", "Car")
+            tracker.process_sample(lap_sample(0.0, 0, 0.0, 0, 0))
+            tracker.process_sample(lap_sample(30.0, 30000, 0.3, 0, 1))
+            finish = lap_sample(90.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 90000
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            self.assertEqual([sector.sector_number for sector in completed.sectors[:3]], [1, 2, 3])
+            self.assertEqual(completed.sectors[0].time_ms, 30000)
+            self.assertIsNone(completed.sectors[1].time_ms)
+            self.assertEqual(completed.sectors[2].time_ms, 60000)
+
+    def test_normalized_f1_2021_timing_uses_shared_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("F1 2021", "f1_2021_britain", "f1_2021_mclaren")
+            tracker.process_sample(
+                lap_sample(0.0, 0, 0.0, 0, 0)
+            )
+            tracker.active_lap.game = "F1 2021"
+            tracker.active_lap.track = "f1_2021_britain"
+            tracker.active_lap.car = "f1_2021_mclaren"
+            tracker.process_sample(lap_sample(28.0, 28000, 0.33, 0, 1))
+            tracker.process_sample(lap_sample(58.0, 58000, 0.66, 0, 2))
+            finish = lap_sample(88.0, 100, 0.01, 1, 0)
+            finish.source_name = "F1 2021"
+            finish.track_name = "f1_2021_britain"
+            finish.car_name = "f1_2021_mclaren"
+            finish.last_lap_time_ms = 88000
+
+            completed = tracker.process_sample(finish)
+
+            self.assertIsNotNone(completed)
+            self.assertEqual(completed.game, "F1 2021")
+            self.assertEqual([sector.time_ms for sector in completed.sectors[:3]], [28000, 30000, 30000])
+            self.assertEqual(len(storage.load_laps()), 1)
 
     def test_observed_cumulative_splits_are_converted_to_individual_sector_durations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -340,6 +340,7 @@ class LapTracker(QObject):
         self._cumulative_splits_ms = {}
         self._partial_start_sector_index = sample.current_sector_index if partial_first else None
         self.last_event = "Partial lap started" if partial_first else "Lap started"
+        self._logger.info("[Timing] Lap started: lap=%s sector=%s", self.active_lap.lap_number, sample.current_sector_index)
         self._log_timing_debug(
             "Lap Started",
             sample,
@@ -410,11 +411,20 @@ class LapTracker(QObject):
         lap.complete = True
         lap.completed_at = datetime.now().isoformat(timespec="milliseconds")
         self._finalize_open_sector(lap, sample)
+        self._ensure_complete_sector_set(lap)
         self._validate_completed_sector_timing(lap)
         self._freeze_lap_graph(lap)
         self.repository.add_completed_lap(lap)
         self._recalculate_sector_timing_statuses(lap)
         self.last_event = f"Lap completed: lap={lap.lap_number} time_ms={lap.lap_time_ms}"
+        self._logger.info(
+            "[Timing] Lap completed: lap=%s lap_time=%s s1=%s s2=%s s3=%s",
+            lap.lap_number,
+            lap.lap_time_ms,
+            sector_time(lap, 1),
+            sector_time(lap, 2),
+            sector_time(lap, 3),
+        )
         self._set_timing_state(TimingState.LAP_COMPLETED, self.last_event)
         self._save_lap(lap)
         return lap
@@ -440,6 +450,7 @@ class LapTracker(QObject):
             return
         if sector_index == self._last_sector_index:
             return
+        self._logger.info("[Timing] Sector changed: old=%s new=%s", self._last_sector_index, sector_index)
         self._append_completed_sector(int(self._last_sector_index), sample)
         self._last_sector_index = sector_index
         self._last_sector_start_ms = sample.current_lap_time_ms
@@ -462,6 +473,11 @@ class LapTracker(QObject):
             return
         sector_number = sector_index + 1
         if sector_number in {sector.sector_number for sector in target_lap.sectors}:
+            self._logger.warning(
+                "[Timing] Duplicate sector event ignored: lap=%s sector=%s",
+                target_lap.lap_number,
+                sector_number,
+            )
             return
         sector_time, source = self._sector_time_from_sample(sector_index, sample, lap_time_ms)
         if sector_time is not None:
@@ -477,6 +493,13 @@ class LapTracker(QObject):
                 valid=target_lap.valid,
                 timing_source=source,
             )
+        )
+        self._logger.info(
+            "[Timing] Sector recorded: lap=%s sector=%s time=%s source=%s",
+            target_lap.lap_number,
+            sector_number,
+            sector_time,
+            source,
         )
         self.last_event = f"Sector completed: S{sector_number} source={source} time_ms={sector_time}"
         self._log_timing_debug(
@@ -556,11 +579,93 @@ class LapTracker(QObject):
     def _split_matches_boundary(split_ms: int | None, boundary_ms: int | None) -> bool:
         return split_ms is not None and boundary_ms is not None and abs(int(split_ms) - int(boundary_ms)) <= SECTOR_SUM_TOLERANCE_MS
 
+    def _ensure_complete_sector_set(self, lap: LapResult) -> None:
+        if lap.lap_time_ms is None:
+            return
+        boundaries = self._observed_sector_boundaries(lap)
+        if 1 in self._cumulative_splits_ms:
+            boundaries[1] = self._cumulative_splits_ms[1]
+        if 2 in self._cumulative_splits_ms:
+            boundaries[2] = self._cumulative_splits_ms[2]
+        if 3 not in boundaries:
+            boundaries[3] = int(lap.lap_time_ms)
+        if 1 not in boundaries or 2 not in boundaries:
+            missing = [number for number in (1, 2) if number not in boundaries]
+            self._logger.warning(
+                "[Timing] Missing sector boundaries before save: lap=%s missing=%s",
+                lap.lap_number,
+                missing,
+            )
+        existing = {sector.sector_number: sector for sector in lap.sectors}
+        previous_boundary = 0
+        for sector_number in (1, 2, 3):
+            boundary = boundaries.get(sector_number)
+            sector = existing.get(sector_number)
+            if sector is not None and sector.time_ms is not None and sector.time_ms > 0:
+                previous_boundary += int(sector.time_ms)
+                continue
+            if boundary is not None and boundary > previous_boundary:
+                calculated = int(boundary - previous_boundary)
+                if sector is None:
+                    lap.sectors.append(
+                        SectorResult(
+                            sector_number=sector_number,
+                            time_ms=calculated,
+                            valid=lap.valid,
+                            timing_source="normalized_sector_boundary",
+                        )
+                    )
+                else:
+                    sector.time_ms = calculated
+                    sector.valid = lap.valid
+                    sector.timing_source = "normalized_sector_boundary"
+                self._completed_sector_total_ms += calculated if sector is None else 0
+                self._logger.info(
+                    "[Timing] Sector recorded: lap=%s sector=%s time=%s source=normalized_sector_boundary",
+                    lap.lap_number,
+                    sector_number,
+                    calculated,
+                )
+                previous_boundary = int(boundary)
+            elif sector is None:
+                lap.sectors.append(
+                    SectorResult(
+                        sector_number=sector_number,
+                        time_ms=None,
+                        valid=False,
+                        timing_source="unavailable",
+                    )
+                )
+        lap.sectors.sort(key=lambda sector: sector.sector_number)
+
+    def _observed_sector_boundaries(self, lap: LapResult) -> dict[int, int]:
+        boundaries: dict[int, int] = {}
+        previous_sector: int | None = None
+        for sample in lap.samples:
+            sector = sample.current_sector_index
+            if sector is None:
+                continue
+            sector_index = int(sector)
+            if previous_sector is None:
+                previous_sector = sector_index
+                continue
+            if sector_index == previous_sector:
+                continue
+            if sector_index in (1, 2) and sample.current_lap_time_ms is not None:
+                boundaries[sector_index] = int(sample.current_lap_time_ms)
+            previous_sector = sector_index
+        return boundaries
+
     def _validate_completed_sector_timing(self, lap: LapResult) -> None:
         if lap.lap_time_ms is None:
             return
         sectors = sorted(lap.sectors, key=lambda sector: sector.sector_number)
         if len(sectors) < 3:
+            self._logger.warning(
+                "[Timing] Incomplete sector data on completed lap: lap_id=%s sector_count=%s",
+                lap.id,
+                len(sectors),
+            )
             return
         first_three = sectors[:3]
         sector_times = [sector.time_ms for sector in first_three]
@@ -747,6 +852,11 @@ class LapTracker(QObject):
 
 def personal_best_time(laps: list[LapResult], lap: LapResult) -> int:
     return min([other.lap_time_ms for other in laps if same_scope(other, lap) and other.lap_time_ms is not None], default=10**12)
+
+
+def sector_time(lap: LapResult, sector_number: int) -> int | None:
+    sector = next((item for item in lap.sectors if item.sector_number == sector_number), None)
+    return sector.time_ms if sector is not None else None
 
 
 def append_note(existing: str, note: str) -> str:

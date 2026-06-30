@@ -1019,10 +1019,10 @@ class MainWindow(QMainWindow):
         self.common_labels["session_state"].setText(sample.session_state or "--")
         for panel in self.graph_panels:
             panel.add_sample(sample)
-        self.lap_tracker.process_sample(sample)
-        self._update_live_value_template_panels(sample)
         self._update_live_lap_template_panels(sample)
         self._update_sector_template_panels(sample)
+        self.lap_tracker.process_sample(sample)
+        self._update_live_value_template_panels(sample)
         if self.is_recording:
             self.recording_samples.append(sample)
             self.recording_count_label.setText(f"Samples: {len(self.recording_samples)}")
@@ -1294,7 +1294,11 @@ class MainWindow(QMainWindow):
         self._update_current_lap_graph_panels(lap)
 
     def handle_lap_completed(self, lap: LapResult) -> None:
+        if any(existing.id == lap.id for existing in self.saved_laps):
+            self._logger.warning("Duplicate completed lap ignored by UI history: lap_id=%s", lap.id)
+            return
         self.saved_laps.insert(0, lap)
+        self._logger.info("[Timing] Lap added to history: lap=%s lap_id=%s", lap.lap_number, lap.id)
         self.lap_labels["last_lap"].setText(format_time_ms(lap.lap_time_ms))
         valid_times = [item.lap_time_ms for item in self.saved_laps if item.valid and item.lap_time_ms is not None]
         self.lap_labels["best_lap"].setText(format_time_ms(min(valid_times) if valid_times else None))

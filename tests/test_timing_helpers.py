@@ -70,6 +70,8 @@ class TimingHelperTests(unittest.TestCase):
     def test_display_name_catalog_and_fallback(self) -> None:
         self.assertEqual(display_car_name("Porsche_911_gt3"), "Porsche 911 GT3")
         self.assertEqual(display_track_name("ks_silverstone"), "Silverstone")
+        self.assertEqual(display_car_name("f1_2021_mclaren"), "McLaren")
+        self.assertEqual(display_track_name("f1_2021_britain"), "Silverstone")
         self.assertEqual(display_track_name("unknown_fast_track"), "Unknown Fast Track")
 
     def test_session_summary_save_load(self) -> None:
@@ -90,6 +92,16 @@ class TimingHelperTests(unittest.TestCase):
             self.assertEqual(summaries[0].lap_count, 1)
             self.assertEqual(summaries[0].best_lap_time_ms, 100000)
             self.assertEqual(summaries[0].ended_at, "2026-01-01T10:10:00.000")
+
+    def test_corrupted_storage_file_is_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "laps.sqlite3"
+            path.write_text("not sqlite", encoding="utf-8")
+
+            storage = LapStorage(path)
+
+            self.assertEqual(storage.load_laps(), [])
+            self.assertTrue(any(item.name.startswith("laps.sqlite3.corrupt-") for item in Path(tmpdir).iterdir()))
 
 
 if __name__ == "__main__":
