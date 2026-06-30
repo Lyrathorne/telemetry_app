@@ -6,13 +6,14 @@ from PySide6.QtWidgets import QDockWidget, QMainWindow, QMenu, QWidget
 
 
 class DetachedPanelWindow(QMainWindow):
-    def __init__(self, main_window, dock: QDockWidget, panel_widget: QWidget) -> None:
+    def __init__(self, main_window, dock: QDockWidget | None, panel_widget: QWidget, panel_id: str | None = None, title: str | None = None) -> None:
         super().__init__(None, Qt.WindowType.Window)
         self.main_window = main_window
         self.dock = dock
+        self.panel_id = panel_id or (dock.objectName() if dock is not None else "")
         self.panel_widget = panel_widget
-        self.setObjectName(f"detached_{dock.objectName()}")
-        self.setWindowTitle(dock.windowTitle())
+        self.setObjectName(f"detached_{self.panel_id}")
+        self.setWindowTitle(title or (dock.windowTitle() if dock is not None else self.panel_id))
         self.setWindowOpacity(1.0)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
@@ -25,7 +26,7 @@ class DetachedPanelWindow(QMainWindow):
         self.menuBar().addAction(dock_back_action)
 
     def dock_back(self) -> None:
-        self.main_window.dock_panel_back(self.dock.objectName())
+        self.main_window.dock_panel_back(self.panel_id)
 
     def closeEvent(self, event) -> None:
         self.hide()

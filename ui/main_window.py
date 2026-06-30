@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -52,6 +53,7 @@ from telemetry.lap_tracker import LapTracker
 from telemetry.session_store import SessionStore
 from ui.graph_panel import GraphPanel, PENS
 from ui.docking import DetachedPanelWindow, install_dock_context_menu
+from ui.dashboard_workspace import DashboardWorkspace
 from ui.panel_registry import PanelRegistry
 from ui.panel_templates import BUILTIN_LAYOUTS, PANEL_TEMPLATES, TEMPLATE_GROUPS, PanelTemplate
 
@@ -79,6 +81,8 @@ class MainWindow(QMainWindow):
         self.shared_memory_labels: dict[str, QLabel] = {}
         self.docks: dict[str, QDockWidget] = {}
         self.detached_windows: dict[str, DetachedPanelWindow] = {}
+        self.panel_widgets: dict[str, QWidget] = {}
+        self.panel_titles: dict[str, str] = {}
         self.panel_registry = PanelRegistry()
         self.panel_templates: dict[str, str] = {}
         self._panel_type_counters: dict[str, int] = {}
@@ -149,7 +153,7 @@ class MainWindow(QMainWindow):
 
         self.add_graph_action = QAction("Add graph panel", self)
         self.add_graph_action.setShortcut(QKeySequence("Ctrl+Shift+G"))
-        self.add_graph_action.triggered.connect(self.add_graph_panel)
+        self.add_graph_action.triggered.connect(lambda: self.create_panel_from_template("live_graph"))
 
         self.add_panel_action = QAction("Add telemetry panel", self)
         self.add_panel_action.triggered.connect(self.show_panel_picker_hint)
@@ -192,6 +196,27 @@ class MainWindow(QMainWindow):
         self.about_action = QAction("About", self)
         self.about_action.triggered.connect(self.show_about)
 
+        self.edit_layout_action = QAction("Edit layout", self)
+        self.edit_layout_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        self.edit_layout_action.setCheckable(True)
+        self.edit_layout_action.triggered.connect(self.toggle_dashboard_edit_mode)
+
+        self.split_horizontal_action = QAction("Split selected tile horizontally", self)
+        self.split_horizontal_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.split_horizontal_action.triggered.connect(lambda: self.split_selected_tile("right"))
+
+        self.split_vertical_action = QAction("Split selected tile vertically", self)
+        self.split_vertical_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        self.split_vertical_action.triggered.connect(lambda: self.split_selected_tile("below"))
+
+        self.create_tab_group_action = QAction("Create tab group", self)
+        self.create_tab_group_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        self.create_tab_group_action.triggered.connect(self.create_selected_tab_group)
+
+        self.compact_panel_action = QAction("Toggle compact mode", self)
+        self.compact_panel_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self.compact_panel_action.triggered.connect(self.toggle_selected_compact_mode)
+
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.import_action)
@@ -208,6 +233,34 @@ class MainWindow(QMainWindow):
         self._populate_add_panel_menu(self.add_panel_menu)
         self.view_menu.addAction(self.reset_layout_action)
         self.view_menu.addAction(self.recover_panels_action)
+
+        dashboard_menu = self.menuBar().addMenu("Dashboard")
+        dashboard_menu.addAction(self.edit_layout_action)
+        dashboard_menu.addAction(self.split_horizontal_action)
+        dashboard_menu.addAction(self.split_vertical_action)
+        dashboard_menu.addAction(self.create_tab_group_action)
+        dashboard_menu.addAction(self.compact_panel_action)
+        dashboard_menu.addSeparator()
+        dashboard_add_menu = dashboard_menu.addMenu("Add panel")
+        self._populate_add_panel_menu(dashboard_add_menu)
+        grids_menu = dashboard_menu.addMenu("Quick grids")
+        for title, columns, rows in (
+            ("1x1", 1, 1),
+            ("2 columns", 2, 1),
+            ("3 columns", 3, 1),
+            ("2 rows", 1, 2),
+            ("2x2 grid", 2, 2),
+            ("3x2 grid", 3, 2),
+            ("3x3 grid", 3, 3),
+        ):
+            action = QAction(title, self)
+            action.triggered.connect(lambda _checked=False, c=columns, r=rows: self.apply_quick_grid(c, r))
+            grids_menu.addAction(action)
+        presets_menu = dashboard_menu.addMenu("Telemetry presets")
+        for title in ("Live driving compact", "Timing wall", "Analysis workspace", "Ultrawide telemetry"):
+            action = QAction(title, self)
+            action.triggered.connect(lambda _checked=False, preset=title: self.apply_dashboard_preset(preset))
+            presets_menu.addAction(action)
 
         layouts_menu = self.menuBar().addMenu("Layouts")
         for name in ("Live driving", "Timing", "Analysis", "Diagnostics"):
@@ -261,7 +314,19 @@ class MainWindow(QMainWindow):
         self.add_panel_menu.exec(self.mapToGlobal(self.rect().center()))
 
     def _build_interface(self) -> None:
-        central = self._create_source_controls()
+        central = QWidget(self)
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(4, 4, 4, 4)
+        central_layout.setSpacing(4)
+        source_controls = self._create_source_controls()
+        source_controls.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.dashboard_workspace = DashboardWorkspace(self)
+        self.dashboard_workspace.add_panel_requested.connect(self._add_panel_to_tile_menu)
+        self.dashboard_workspace.detach_panel_requested.connect(self.detach_panel)
+        self.dashboard_workspace.close_panel_requested.connect(self.close_panel)
+        self.dashboard_workspace.compact_panel_requested.connect(self.set_panel_compact_mode)
+        central_layout.addWidget(source_controls)
+        central_layout.addWidget(self.dashboard_workspace, stretch=1)
         central.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         central.customContextMenuRequested.connect(lambda position: self.add_panel_menu.exec(central.mapToGlobal(position)))
         self.setCentralWidget(central)
@@ -316,6 +381,8 @@ class MainWindow(QMainWindow):
         widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.addDockWidget(area, dock)
         self.docks[object_name] = dock
+        self.panel_widgets[object_name] = widget
+        self.panel_titles[object_name] = title
         self.panel_registry.register(object_name, "builtin", title, dock, widget, singleton=True)
         install_dock_context_menu(self, dock)
         return dock
@@ -596,7 +663,7 @@ class MainWindow(QMainWindow):
         except (IndexError, ValueError):
             return 0
 
-    def create_panel_from_template(self, template_id: str) -> str | None:
+    def create_panel_from_template(self, template_id: str, tile_id: str | None = None) -> str | None:
         template = PANEL_TEMPLATES.get(template_id)
         if template is None:
             self._logger.warning("Unknown panel template ignored: %s", template_id)
@@ -612,31 +679,49 @@ class MainWindow(QMainWindow):
         if template.singleton:
             existing = self._find_template_panel(template_id)
             if existing:
-                self.docks[existing].show()
-                self.docks[existing].raise_()
+                if existing in self.docks:
+                    self.docks[existing].show()
+                    self.docks[existing].raise_()
                 return existing
 
         prefix = template.template_id
         panel_id = self._next_panel_id(prefix)
         if template.panel_type == "graph":
-            return self.add_graph_panel(template.title, template.default_config, panel_id=panel_id, template_id=template.template_id)
-        widget = self._create_template_widget(template, panel_id)
+            widget = self._create_graph_panel_widget(template.title, template.default_config)
+        else:
+            widget = self._create_template_widget(template, panel_id)
         if widget is None:
             return None
-        dock = self._add_dock(panel_id, template.title, widget, Qt.DockWidgetArea.RightDockWidgetArea)
-        record = self.panel_registry.get(panel_id)
-        if record is not None:
-            record.panel_type = template.panel_type
-            record.singleton = template.singleton
-        self.panel_templates[panel_id] = template_id
-        if hasattr(self, "view_menu"):
-            self.view_menu.addAction(dock.toggleViewAction())
-        self._update_actions()
+        self._register_workspace_panel(panel_id, template, widget, tile_id)
         return panel_id
+
+    def _register_workspace_panel(self, panel_id: str, template: PanelTemplate, widget: QWidget, tile_id: str | None = None) -> None:
+        widget.setWindowTitle(template.title)
+        self.panel_widgets[panel_id] = widget
+        self.panel_titles[panel_id] = template.title
+        self.panel_templates[panel_id] = template.template_id
+        self.panel_registry.register(
+            panel_id,
+            template.panel_type,
+            template.title,
+            None,
+            widget,
+            singleton=template.singleton,
+            location="workspace",
+        )
+        self.dashboard_workspace.add_panel(panel_id, template.title, widget, tile_id=tile_id)
+
+    def _create_graph_panel_widget(self, title: str, config: dict | None) -> GraphPanel:
+        panel = GraphPanel(title, self.settings.graph_refresh_ms(), self.settings.graph_history_limit(), self)
+        panel.setMinimumSize(120, 90)
+        if config:
+            panel.restore_settings_state(config)
+        self.graph_panels.append(panel)
+        return panel
 
     def _find_template_panel(self, template_id: str) -> str | None:
         for panel_id, saved_template_id in self.panel_templates.items():
-            if saved_template_id == template_id and panel_id in self.docks:
+            if saved_template_id == template_id and (panel_id in self.docks or panel_id in self.panel_widgets):
                 return panel_id
         return None
 
@@ -1370,14 +1455,17 @@ class MainWindow(QMainWindow):
             "schema_version": LAYOUT_SCHEMA_VERSION,
             "geometry": self._byte_array_to_text(self.saveGeometry()),
             "dock_state": self._byte_array_to_text(self.saveState()),
+            "workspace": self.dashboard_workspace.snapshot(),
+            "dashboard_edit_mode": self.edit_layout_action.isChecked(),
             "panels": [
                 {
                     "panel_id": record.panel_id,
                     "panel_type": record.panel_type,
                     "template_id": self.panel_templates.get(record.panel_id, record.panel_type),
                     "title": record.title,
-                    "visible": record.dock.isVisible(),
+                    "visible": record.dock.isVisible() if record.dock is not None else record.panel_id in self.dashboard_workspace.panel_to_tile,
                     "detached": record.panel_id in self.detached_windows,
+                    "location": record.location,
                     "config": self._panel_config(record.panel_id),
                 }
                 for record in self.panel_registry.records()
@@ -1394,7 +1482,7 @@ class MainWindow(QMainWindow):
 
     def _panel_config(self, panel_id: str) -> dict:
         dock = self.docks.get(panel_id)
-        widget = dock.widget() if dock is not None else None
+        widget = dock.widget() if dock is not None else self.panel_widgets.get(panel_id)
         if isinstance(widget, GraphPanel):
             return widget.settings_state()
         return {}
@@ -1425,18 +1513,14 @@ class MainWindow(QMainWindow):
             if template is None:
                 self._logger.warning("Ignoring unknown panel type in saved layout: %s", template_id)
                 continue
+            if template.panel_type == "builtin":
+                continue
             if template.panel_type == "graph":
-                self.add_graph_panel(item.get("title") or template.title, item.get("config") or template.default_config, panel_id=panel_id, template_id=template_id)
-            elif template.panel_type != "builtin":
+                widget = self._create_graph_panel_widget(item.get("title") or template.title, item.get("config") or template.default_config)
+            else:
                 widget = self._create_template_widget(template, panel_id)
-                if widget is not None:
-                    dock = self._add_dock(panel_id, item.get("title") or template.title, widget, Qt.DockWidgetArea.RightDockWidgetArea)
-                    record = self.panel_registry.get(panel_id)
-                    if record is not None:
-                        record.panel_type = template.panel_type
-                        record.singleton = template.singleton
-                    self.panel_templates[panel_id] = template_id
-                    self.view_menu.addAction(dock.toggleViewAction())
+            if widget is not None:
+                self._register_workspace_panel(panel_id, template, widget)
 
         geometry_text = data.get("geometry")
         dock_state_text = data.get("dock_state")
@@ -1447,11 +1531,23 @@ class MainWindow(QMainWindow):
                 self._logger.warning("Versioned dock state could not be restored")
                 return False
         self._dock_all_qt_floating_widgets()
+        workspace_data = data.get("workspace")
+        if isinstance(workspace_data, dict):
+            workspace_widgets = {
+                panel_id: (self.panel_titles.get(panel_id, panel_id), widget)
+                for panel_id, widget in self.panel_widgets.items()
+                if panel_id not in self.docks
+            }
+            if not self.dashboard_workspace.restore(workspace_data, workspace_widgets):
+                self._logger.warning("Dashboard workspace tree could not be restored")
+                return False
+        self.edit_layout_action.setChecked(bool(data.get("dashboard_edit_mode", False)))
+        self.dashboard_workspace.set_edit_mode(self.edit_layout_action.isChecked())
         for detached in data.get("detached", []):
             if not isinstance(detached, dict):
                 continue
             panel_id = str(detached.get("panel_id", ""))
-            if panel_id in self.docks and panel_id not in self.detached_windows:
+            if panel_id in self.panel_widgets and panel_id not in self.detached_windows:
                 self.detach_panel(panel_id, show=False)
                 window = self.detached_windows.get(panel_id)
                 if window is not None and isinstance(detached.get("geometry"), str):
@@ -1494,20 +1590,27 @@ class MainWindow(QMainWindow):
                 self.detached_windows[dock_id].show()
                 self.detached_windows[dock_id].raise_()
             return
-        dock = self.docks[dock_id]
-        widget = dock.widget()
-        if widget is None:
-            return
-        dock.setWidget(QWidget())
-        dock.hide()
-        window = DetachedPanelWindow(self, dock, widget)
+        dock = self.docks.get(dock_id)
+        if dock is not None:
+            widget = dock.widget()
+            if widget is None:
+                return
+            dock.setWidget(QWidget())
+            dock.hide()
+            title = dock.windowTitle()
+        else:
+            widget = self.dashboard_workspace.remove_panel(dock_id)
+            if widget is None:
+                return
+            title = self.panel_titles.get(dock_id, dock_id)
+        window = DetachedPanelWindow(self, dock, widget, panel_id=dock_id, title=title)
         window.setWindowOpacity(1.0)
         self.detached_windows[dock_id] = window
         if show:
             window.show()
         self._ensure_window_visible()
 
-    def dock_panel_back(self, dock_id: str) -> None:
+    def dock_panel_back(self, dock_id: str, tile_id: str | None = None) -> None:
         window = self.detached_windows.pop(dock_id, None)
         if window is None:
             dock = self.docks.get(dock_id)
@@ -1515,13 +1618,15 @@ class MainWindow(QMainWindow):
                 dock.show()
             return
         widget = window.takeCentralWidget()
-        dock = self.docks[dock_id]
-        if widget is not None:
+        dock = self.docks.get(dock_id)
+        if widget is not None and dock is not None:
             dock.setWidget(widget)
+            dock.show()
+            dock.raise_()
+        elif widget is not None:
+            self.dashboard_workspace.add_panel(dock_id, self.panel_titles.get(dock_id, dock_id), widget, tile_id=tile_id)
         window.hide()
         window.deleteLater()
-        dock.show()
-        dock.raise_()
 
     def recover_all_panels(self) -> None:
         for dock_id in list(self.detached_windows):
@@ -1529,6 +1634,91 @@ class MainWindow(QMainWindow):
         for dock in self.docks.values():
             dock.show()
         self._ensure_window_visible()
+
+    def close_panel(self, panel_id: str) -> None:
+        if panel_id in self.detached_windows:
+            self.dock_panel_back(panel_id)
+        widget = self.dashboard_workspace.remove_panel(panel_id)
+        dock = self.docks.get(panel_id)
+        if dock is not None:
+            dock.hide()
+            return
+        if widget is not None:
+            if isinstance(widget, GraphPanel) and widget in self.graph_panels:
+                self.graph_panels.remove(widget)
+            widget.deleteLater()
+        self.panel_registry.remove(panel_id)
+        self.panel_widgets.pop(panel_id, None)
+        self.panel_titles.pop(panel_id, None)
+        self.panel_templates.pop(panel_id, None)
+
+    def toggle_dashboard_edit_mode(self, checked: bool) -> None:
+        self.dashboard_workspace.set_edit_mode(checked)
+
+    def split_selected_tile(self, direction: str) -> str | None:
+        tile = self.dashboard_workspace.first_tile()
+        return self.dashboard_workspace.split_tile(tile.tile_id, direction)
+
+    def create_selected_tab_group(self) -> None:
+        tile = self.dashboard_workspace.first_tile()
+        if tile.tabs.count() == 0:
+            self._add_panel_to_tile_menu(tile.tile_id)
+
+    def toggle_selected_compact_mode(self) -> None:
+        tile = self.dashboard_workspace.first_tile()
+        panel_id = tile.current_panel_id()
+        if panel_id:
+            widget = self.panel_widgets.get(panel_id)
+            self.set_panel_compact_mode(panel_id, not bool(widget and widget.property("compact_mode")))
+
+    def set_panel_compact_mode(self, panel_id: str, compact: bool) -> None:
+        widget = self.panel_widgets.get(panel_id)
+        if widget is None:
+            return
+        widget.setProperty("compact_mode", compact)
+        if isinstance(widget, GraphPanel):
+            widget.set_compact_mode(compact)
+        else:
+            margins = (2, 2, 2, 2) if compact else (6, 6, 6, 6)
+            layout = widget.layout()
+            if layout is not None:
+                layout.setContentsMargins(*margins)
+
+    def _add_panel_to_tile_menu(self, tile_id: str) -> None:
+        menu = QMenu(self)
+        for group_name, template_ids in TEMPLATE_GROUPS.items():
+            group_menu = menu.addMenu(group_name)
+            for template_id in template_ids:
+                template = PANEL_TEMPLATES[template_id]
+                action = QAction(template.title, self)
+                action.triggered.connect(lambda _checked=False, item=template_id, target=tile_id: self.create_panel_from_template(item, target))
+                group_menu.addAction(action)
+        menu.exec(self.mapToGlobal(self.rect().center()))
+
+    def apply_quick_grid(self, columns: int, rows: int) -> None:
+        self.dashboard_workspace.quick_grid(columns, rows)
+
+    def apply_dashboard_preset(self, name: str) -> None:
+        if name == "Live driving compact":
+            self.dashboard_workspace.quick_grid(2, 2)
+            for template in ("pedals_graph", "speed_rpm_graph", "live_values", "sector_timing"):
+                panel_id = self.create_panel_from_template(template)
+                if panel_id:
+                    self.set_panel_compact_mode(panel_id, template in {"live_values", "sector_timing"})
+        elif name == "Timing wall":
+            self.dashboard_workspace.quick_grid(3, 3)
+            for template in ("live_values", "sector_timing", "sector_timing", "sector_timing", "best_laps", "live_lap_timing"):
+                panel_id = self.create_panel_from_template(template)
+                if panel_id:
+                    self.set_panel_compact_mode(panel_id, template != "live_lap_timing")
+        elif name == "Analysis workspace":
+            self.dashboard_workspace.quick_grid(2, 3)
+            for template in ("lap_comparison", "lap_history", "pedals_graph", "sector_timing", "time_delta_graph"):
+                self.create_panel_from_template(template)
+        elif name == "Ultrawide telemetry":
+            self.dashboard_workspace.quick_grid(4, 2)
+            for template in ("live_values", "pedals_graph", "speed_rpm_graph", "live_lap_timing", "sector_timing", "source_status", "connection_diagnostics"):
+                self.create_panel_from_template(template)
 
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self.settings, self)

@@ -588,6 +588,7 @@ class GraphPanel(QWidget):
             "include_zero": self.include_zero_checkbox.isChecked(),
             "legend": self.legend_checkbox.isChecked(),
             "settings_hidden": self.settings_toggle_button.isChecked(),
+            "compact": bool(self.property("compact_mode")),
         }
 
     def restore_settings_state(self, state: dict) -> None:
@@ -616,6 +617,8 @@ class GraphPanel(QWidget):
         self.legend_checkbox.setChecked(bool(state.get("legend", True)))
         self.set_settings_hidden(bool(state.get("settings_hidden", False)))
         self.settings_toggle_button.setChecked(bool(state.get("settings_hidden", False)))
+        if "compact" in state:
+            self.set_compact_mode(bool(state.get("compact")))
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value, default) -> None:
@@ -630,6 +633,29 @@ class GraphPanel(QWidget):
         self.settings_toggle_button.setText("Show settings" if hidden else "Hide graph settings")
         if self.plot_widget is not None:
             self.plot_widget.updateGeometry()
+
+    def set_compact_mode(self, compact: bool) -> None:
+        self.setProperty("compact_mode", compact)
+        layout = self.layout()
+        if layout is not None:
+            margin = 2 if compact else 6
+            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setSpacing(2 if compact else 6)
+        if compact:
+            self.settings_toggle_button.setChecked(True)
+            self.legend_checkbox.setChecked(False)
+        self.stats_label.setVisible(not compact)
+        self.error_label.setVisible(not compact)
+        for widget in (
+            self.export_image_button,
+            self.pause_button,
+            self.clear_visual_button,
+            self.new_session_button,
+            self.return_live_button,
+        ):
+            widget.setVisible(not compact)
+        if self.plot_widget is not None:
+            self.plot_widget.setMinimumSize(96 if compact else 280, 72 if compact else 180)
 
     def reset_view(self) -> None:
         self.reset_x_axis()

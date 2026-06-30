@@ -36,7 +36,7 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
     def test_pedals_graph_template_configuration(self) -> None:
         window = MainWindow(reset_layout=True)
         panel_id = window.create_panel_from_template("pedals_graph")
-        panel = window.docks[panel_id].widget()
+        panel = window.panel_widgets[panel_id]
         self.assertIsInstance(panel, GraphPanel)
         self.assertEqual(panel.selected_metrics(), ["throttle_percent", "brake_percent"])
         self.assertEqual(panel.y_mode_combo.currentData(), "metric_default")
@@ -46,7 +46,7 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
     def test_speed_rpm_template_uses_separate_graphs(self) -> None:
         window = MainWindow(reset_layout=True)
         panel_id = window.create_panel_from_template("speed_rpm_graph")
-        graphs = window.docks[panel_id].widget().findChildren(GraphPanel)
+        graphs = window.panel_widgets[panel_id].findChildren(GraphPanel)
         self.assertEqual([graph.selected_metrics() for graph in graphs], [["speed_kmh"], ["rpm"]])
         window.close()
 
@@ -58,7 +58,7 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
         self.assertEqual(labels["speed"].text(), "42 km/h")
         self.assertEqual(labels["clutch"].text(), "--")
         self.assertEqual(labels["delta"].text(), "Unavailable")
-        self.assertIsNotNone(window.docks[panel_id])
+        self.assertIn(panel_id, window.dashboard_workspace.panel_to_tile)
         window.close()
 
     def test_singleton_template_is_not_duplicated(self) -> None:
@@ -118,10 +118,93 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
 
     def test_visible_button_can_receive_click(self) -> None:
         window = MainWindow(reset_layout=True)
-        button = window.findChild(QPushButton, "")
         buttons = [item for item in window.findChildren(QPushButton) if item.isEnabled()]
         self.assertTrue(buttons)
         self.assertFalse(any(button.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents) for button in buttons))
+        window.close()
+
+    def test_workspace_tile_can_split_horizontally_and_vertically(self) -> None:
+        window = MainWindow(reset_layout=True)
+        first_tile = window.dashboard_workspace.first_tile().tile_id
+        second = window.dashboard_workspace.split_tile(first_tile, "right")
+        third = window.dashboard_workspace.split_tile(second, "below")
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(third)
+        self.assertEqual(window.dashboard_workspace.tile_count(), 3)
+        window.close()
+
+    def test_workspace_split_is_local_and_preserves_existing_panel(self) -> None:
+        window = MainWindow(reset_layout=True)
+        panel_id = window.create_panel_from_template("pedals_graph")
+        original_tile = window.dashboard_workspace.panel_to_tile[panel_id]
+        window.dashboard_workspace.split_tile(original_tile, "below")
+        self.assertEqual(window.dashboard_workspace.panel_to_tile[panel_id], original_tile)
+        self.assertEqual(window.dashboard_workspace.tile_count(), 2)
+        window.close()
+
+    def test_panel_moves_between_tiles_without_duplication(self) -> None:
+        window = MainWindow(reset_layout=True)
+        panel_id = window.create_panel_from_template("live_values")
+        target = window.dashboard_workspace.split_tile(window.dashboard_workspace.panel_to_tile[panel_id], "right")
+        self.assertTrue(window.dashboard_workspace.move_panel(panel_id, target))
+        occurrences = sum(panel_id in tile.panel_ids() for tile in window.dashboard_workspace.tiles.values())
+        self.assertEqual(occurrences, 1)
+        window.close()
+
+    def test_center_tab_group_adds_second_panel_to_same_tile(self) -> None:
+        window = MainWindow(reset_layout=True)
+        first = window.create_panel_from_template("live_values")
+        tile_id = window.dashboard_workspace.panel_to_tile[first]
+        second = window.create_panel_from_template("sector_timing", tile_id=tile_id)
+        self.assertEqual(window.dashboard_workspace.panel_to_tile[first], window.dashboard_workspace.panel_to_tile[second])
+        self.assertEqual(len(window.dashboard_workspace.tiles[tile_id].panel_ids()), 2)
+        window.close()
+
+    def test_quick_grid_and_ten_panels(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.apply_quick_grid(3, 3)
+        created = [window.create_panel_from_template("pedals_graph") for _ in range(4)]
+        created += [window.create_panel_from_template("live_values") for _ in range(2)]
+        created += [window.create_panel_from_template("sector_timing") for _ in range(3)]
+        created.append(window.create_panel_from_template("speed_rpm_graph"))
+        self.assertEqual(window.dashboard_workspace.tile_count(), 9)
+        self.assertEqual(len([item for item in created if item]), 10)
+        self.assertEqual(len(set(window.panel_registry.ids())), len(window.panel_registry.ids()))
+        window.close()
+
+    def test_workspace_layout_snapshot_restores_splitters_and_ratios(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.apply_quick_grid(2, 2)
+        panel_id = window.create_panel_from_template("pedals_graph")
+        snapshot = window._layout_snapshot()
+        restored = MainWindow(reset_layout=True)
+        self.assertTrue(restored._restore_layout_data(snapshot, notify=False))
+        self.assertEqual(restored.dashboard_workspace.tile_count(), 4)
+        self.assertIn(panel_id, restored.dashboard_workspace.panel_to_tile)
+        self.assertIn("workspace", restored._layout_snapshot())
+        window.close()
+        restored.close()
+
+    def test_detached_workspace_panel_returns_to_small_tile(self) -> None:
+        window = MainWindow(reset_layout=True)
+        panel_id = window.create_panel_from_template("pedals_graph")
+        tile_id = window.dashboard_workspace.panel_to_tile[panel_id]
+        target = window.dashboard_workspace.split_tile(tile_id, "right")
+        window.detach_panel(panel_id)
+        self.assertIn(panel_id, window.detached_windows)
+        window.dock_panel_back(panel_id, tile_id=target)
+        self.assertNotIn(panel_id, window.detached_windows)
+        self.assertEqual(window.dashboard_workspace.panel_to_tile[panel_id], target)
+        window.close()
+
+    def test_compact_mode_reduces_graph_minimum_size(self) -> None:
+        window = MainWindow(reset_layout=True)
+        panel_id = window.create_panel_from_template("pedals_graph")
+        panel = window.panel_widgets[panel_id]
+        old_size = panel.plot_widget.minimumSize()
+        window.set_panel_compact_mode(panel_id, True)
+        self.assertLessEqual(panel.plot_widget.minimumSize().height(), old_size.height())
+        self.assertTrue(panel.property("compact_mode"))
         window.close()
 
 

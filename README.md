@@ -101,9 +101,17 @@ The app never writes logs next to the executable.
 
 Imported session metadata and saved settings are stored under the same `%LOCALAPPDATA%\RacingTelemetry\` tree. Imported sessions are referenced from their original file path and also stored in the app's session index for offline use.
 
-## Dashboard Panels And Layouts
+## Dashboard Workspace, Panels, And Layouts
 
-The dashboard uses movable Qt dock panels with one registered owner per panel ID:
+The app uses a hybrid layout system:
+
+- stable `QDockWidget` panels for built-in utility docks and compatibility
+- a central `DashboardWorkspace` made from nested `QSplitter` tiles and `QTabWidget` tab groups for dense telemetry dashboards
+- managed detached windows for Windows Snap, maximize, minimize, and multi-monitor movement
+
+The original dock-only system could only insert panels into the large outer `QMainWindow` dock areas, so a new panel often consumed half of a side of the application. New telemetry templates now go into the central splitter workspace, where any local tile can be split without resizing the whole window.
+
+Built-in dock panels:
 
 - `Live Telemetry`
 - `Live Graphs`
@@ -113,11 +121,11 @@ The dashboard uses movable Qt dock panels with one registered owner per panel ID
 - `Comparison Graphs`
 - `Laps`
 
-Use the `View` menu to hide or restore panels. Panels can be docked, detached into managed top-level windows, resized, and moved around the window. The current geometry and dock arrangement are saved automatically when the app closes and restored on the next start when layout restoration is enabled.
+Use the `View` menu to hide or restore utility panels. Telemetry templates are added to the central dashboard workspace. Panels can be docked, detached into managed top-level windows, resized, and moved around the window. The current geometry, dock arrangement, splitter tree, tile IDs, tabs, compact state, and detached windows are saved automatically when the app closes and restored on the next start when layout restoration is enabled.
 
 Every panel has a context menu with recovery actions such as detach, dock back, hide, maximize/restore detached panel windows, and reset panel size. The explicit `Detach` action moves the original panel widget into a normal top-level Qt window, so graph/session data is not duplicated or reset. Native Qt floating docks are intentionally disabled; detached windows are managed by Racing Telemetry so stale floating windows cannot block input on startup.
 
-Layouts are saved with a versioned application-level schema around the Qt dock state. If an old or invalid layout contains duplicate panel IDs, stale panel types, impossible geometry, or native floating dock state, the app logs the problem, discards only the layout state, and loads the default dashboard. `--reset-layout` skips saved geometry, dock state, and detached-window restoration while preserving telemetry data and the SQLite lap database.
+Layouts are saved with a versioned application-level schema around both the Qt dock state and the nested dashboard workspace. If an old or invalid layout contains duplicate panel IDs, stale panel types, impossible geometry, malformed splitter trees, or native floating dock state, the app logs the problem, discards only the layout state, and loads the default dashboard. `--reset-layout` skips saved geometry, dock state, workspace state, and detached-window restoration while preserving telemetry data and the SQLite lap database.
 
 The `Layouts` menu includes:
 
@@ -130,6 +138,19 @@ The `Layouts` menu includes:
 - `Load layout...`
 
 `Reset layout` restores a sensible default arrangement.
+
+The `Dashboard` menu includes:
+
+- Edit layout / Lock layout (`Ctrl+Shift+L`)
+- Add panel
+- Split selected tile horizontally (`Ctrl+Shift+H`)
+- Split selected tile vertically (`Ctrl+Shift+V`)
+- Create tab group (`Ctrl+Shift+T`)
+- Toggle compact mode (`Ctrl+Shift+C`)
+- Quick grids: `1x1`, `2 columns`, `3 columns`, `2 rows`, `2x2 grid`, `3x2 grid`, `3x3 grid`
+- Telemetry presets: `Live driving compact`, `Timing wall`, `Analysis workspace`, `Ultrawide telemetry`
+
+Right-click a dashboard tile to add a panel there, split that local tile left/right/above/below, toggle compact mode, detach, close, or remove an empty tile. Splits are local: splitting a bottom-right tile only divides that tile's region.
 
 ## Predefined Telemetry Panel Templates
 
@@ -147,6 +168,8 @@ Use `View > Add telemetry panel`, the toolbar's `Add telemetry panel` button, or
 - Source status and connection diagnostics: singleton built-in panels.
 
 Dynamic templates such as graph panels can have multiple instances and receive unique IDs like `pedals_graph_1` and `pedals_graph_2`. Singleton templates focus the existing panel instead of creating a duplicate.
+
+Compact mode is available for useful small panels. Graph compact mode hides settings/status, reduces margins, and can hide the legend while keeping the same timer-based render pipeline. Live values and sector panels use tighter margins and placeholders such as `--` or `Unavailable` rather than fake zeros.
 
 ## Live Graphs
 
