@@ -26,6 +26,7 @@ from telemetry.timing_status import (
 
 MIN_REASONABLE_LAP_MS = 10_000
 SECTOR_SUM_TOLERANCE_MS = 250
+MAX_SAVED_LAP_SAMPLES = 1000
 
 
 class TimingState(str, Enum):
@@ -414,6 +415,8 @@ class LapTracker(QObject):
         self._ensure_complete_sector_set(lap)
         self._validate_completed_sector_timing(lap)
         self._freeze_lap_graph(lap)
+        lap.samples = downsample_samples(lap.samples, MAX_SAVED_LAP_SAMPLES)
+        lap.raw_samples_recorded = True
         self.repository.add_completed_lap(lap)
         self._recalculate_sector_timing_statuses(lap)
         self.last_event = f"Lap completed: lap={lap.lap_number} time_ms={lap.lap_time_ms}"
@@ -857,6 +860,16 @@ def personal_best_time(laps: list[LapResult], lap: LapResult) -> int:
 def sector_time(lap: LapResult, sector_number: int) -> int | None:
     sector = next((item for item in lap.sectors if item.sector_number == sector_number), None)
     return sector.time_ms if sector is not None else None
+
+
+def downsample_samples(samples: list[TelemetrySample], max_samples: int) -> list[TelemetrySample]:
+    if len(samples) <= max_samples:
+        return list(samples)
+    if max_samples <= 1:
+        return samples[:1]
+    step = (len(samples) - 1) / (max_samples - 1)
+    indexes = sorted({round(index * step) for index in range(max_samples)})
+    return [samples[index] for index in indexes]
 
 
 def append_note(existing: str, note: str) -> str:

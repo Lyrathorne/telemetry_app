@@ -77,6 +77,21 @@ class PanelTemplateAndLayoutTests(unittest.TestCase):
         self.assertTrue(window.session_history_tables)
         window.close()
 
+    def test_session_history_headers_are_not_repeated_as_rows(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("session_history")
+        summary_table, detail_table = window.session_history_tables[-1]
+        summary_headers = [summary_table.horizontalHeaderItem(column).text() for column in range(summary_table.columnCount())]
+        detail_headers = [detail_table.horizontalHeaderItem(column).text() for column in range(detail_table.columnCount())]
+
+        self.assertEqual(summary_headers, ["Track", "Car", "Game", "Date/time", "Best lap", "Laps"])
+        self.assertEqual(detail_headers, ["Lap", "Lap time", "S1", "S2", "S3", "Delta", "Valid", "Notes"])
+        for table, headers in ((summary_table, summary_headers), (detail_table, detail_headers)):
+            for row in range(table.rowCount()):
+                values = [table.item(row, column).text() for column in range(table.columnCount()) if table.item(row, column)]
+                self.assertNotEqual(values, headers)
+        window.close()
+
     def test_dynamic_templates_get_unique_ids(self) -> None:
         window = MainWindow(reset_layout=True)
         first = window.create_panel_from_template("pedals_graph")

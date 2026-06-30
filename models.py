@@ -159,6 +159,37 @@ class SessionSummary:
     valid_lap_count: int = 0
 
 
+@dataclass(slots=True)
+class TelemetryPoint:
+    timestamp: float = 0.0
+    lap_time: float | None = None
+    lap_progress: float | None = None
+    distance: float | None = None
+    speed_kmh: float | None = None
+    throttle_percent: float | None = None
+    brake_percent: float | None = None
+    steering: float | None = None
+    gear: int | None = None
+    rpm: int | None = None
+
+
+@dataclass(slots=True)
+class ReferenceLap:
+    id: str = field(default_factory=lambda: uuid4().hex)
+    game: str = ""
+    track_id: str = ""
+    track_display_name: str = ""
+    car_id: str = ""
+    car_display_name: str = ""
+    lap_time_ms: int | None = None
+    source: str = "imported"
+    player_name: str = ""
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))
+    imported_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))
+    telemetry_points: list[TelemetryPoint] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+
+
 def format_time_ms(time_ms: int | None) -> str:
     if time_ms is None or int(time_ms) < 0:
         return "\u2014"

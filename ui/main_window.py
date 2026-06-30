@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from app.paths import logs_dir, settings_dir
 from app.settings import AppSettings, DEFAULT_F1_UDP_PORT
-from models import METRICS, LapResult, TelemetrySample, TelemetrySession, format_gear, format_time_ms
+from models import METRICS, LapResult, ReferenceLap, TelemetrySample, TelemetrySession, format_gear, format_time_ms
 from telemetry import SOURCE_LABELS, SOURCE_TYPES
 from telemetry.base import SourceState
 from telemetry.comparison import build_comparison_series, preferred_axis, speed_delta
@@ -52,6 +52,7 @@ from telemetry.importer import TelemetryImportError, import_telemetry_file
 from telemetry.lap_delta import completed_lap_delta_ms, format_delta_ms, live_lap_delta_ms
 from telemetry.lap_comparison import aligned_metric, assert_laps_comparable, common_position_grid, sector_marker_positions, time_delta
 from telemetry.lap_tracker import LapTracker
+from telemetry.sector_feedback import sector_feedback
 from telemetry.session_store import SessionStore
 from ui.graph_panel import GraphPanel, PENS
 from ui.docking import DetachedPanelWindow, install_dock_context_menu
@@ -97,6 +98,8 @@ class MainWindow(QMainWindow):
         self.live_lap_tables: list[QTableWidget] = []
         self.sector_timing_tables: list[QTableWidget] = []
         self.session_history_tables: list[tuple[QTableWidget, QTableWidget]] = []
+        self.active_reference_lap: ReferenceLap | None = None
+        self.reference_overlay_enabled = True
         self.graph_counter = 0
         self.recording_samples: list[TelemetrySample] = []
         self.is_recording = False
@@ -1017,6 +1020,7 @@ class MainWindow(QMainWindow):
         self.common_labels["car_name"].setText(display_car_name(sample.car_name))
         self.common_labels["track_name"].setText(display_track_name(sample.track_name))
         self.common_labels["session_state"].setText(sample.session_state or "--")
+        self._update_active_reference(sample)
         for panel in self.graph_panels:
             panel.add_sample(sample)
         self._update_live_lap_template_panels(sample)
@@ -1306,7 +1310,38 @@ class MainWindow(QMainWindow):
         self._refresh_completed_live_lap_rows()
         self._populate_laps_table()
         self._populate_session_history_panels()
+        self._show_sector_feedback(lap)
         self._update_current_lap_graph_panels(self.lap_tracker.active_lap)
+
+    def _update_active_reference(self, sample: TelemetrySample) -> None:
+        if not self.reference_overlay_enabled or not sample.track_name or not sample.car_name or not sample.source_name:
+            return
+        if (
+            self.active_reference_lap is not None
+            and self.active_reference_lap.game == sample.source_name
+            and self.active_reference_lap.track_id == sample.track_name
+            and self.active_reference_lap.car_id == sample.car_name
+        ):
+            return
+        reference = self.lap_tracker.storage.best_reference_lap(sample.source_name, sample.track_name, sample.car_name)
+        self.active_reference_lap = reference
+        if reference is not None:
+            self.status_label.setText(
+                f"Reference: {reference.player_name or reference.source} {format_time_ms(reference.lap_time_ms)}"
+            )
+
+    def _show_sector_feedback(self, lap: LapResult) -> None:
+        reference = self.active_reference_lap
+        if reference is None:
+            compatible = [
+                item
+                for item in self.saved_laps
+                if item.id != lap.id and item.valid and item.complete and item.track == lap.track and item.car == lap.car
+            ]
+            reference = min(compatible, key=lambda item: item.lap_time_ms or 10**12, default=None)
+        messages = sector_feedback(lap, reference)
+        if messages:
+            self.status_label.setText(messages[0])
 
     def _update_current_lap_graph_panels(self, lap: LapResult | None) -> None:
         samples = lap.samples if lap is not None else []

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.paths import data_dir, ensure_user_directories
-from models import LapResult, SectorResult, SessionSummary, TelemetrySample
+from models import LapResult, ReferenceLap, SectorResult, SessionSummary, TelemetryPoint, TelemetrySample
 
 
 SCHEMA_VERSION = 3
@@ -108,10 +108,27 @@ class LapStorage:
                     FOREIGN KEY(lap_id) REFERENCES laps(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS reference_laps (
+                    id TEXT PRIMARY KEY,
+                    game TEXT NOT NULL,
+                    track_id TEXT NOT NULL,
+                    track_display_name TEXT,
+                    car_id TEXT NOT NULL,
+                    car_display_name TEXT,
+                    lap_time_ms INTEGER,
+                    source TEXT,
+                    player_name TEXT,
+                    created_at TEXT,
+                    imported_at TEXT,
+                    telemetry_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_laps_session ON laps(session_id);
                 CREATE INDEX IF NOT EXISTS idx_laps_track_car ON laps(track, car);
                 CREATE INDEX IF NOT EXISTS idx_laps_lap_time ON laps(lap_time_ms);
                 CREATE INDEX IF NOT EXISTS idx_samples_lap_time ON lap_samples(lap_id, lap_time);
+                CREATE INDEX IF NOT EXISTS idx_reference_scope ON reference_laps(game, track_id, car_id, lap_time_ms);
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(sectors)")}
@@ -397,6 +414,90 @@ class LapStorage:
             connection.execute("DELETE FROM laps WHERE id = ?", (lap_id,))
             connection.commit()
 
+    def save_reference_lap(self, reference: ReferenceLap) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO reference_laps
+                (id, game, track_id, track_display_name, car_id, car_display_name, lap_time_ms,
+                 source, player_name, created_at, imported_at, telemetry_json, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reference.id,
+                    reference.game,
+                    reference.track_id,
+                    reference.track_display_name,
+                    reference.car_id,
+                    reference.car_display_name,
+                    reference.lap_time_ms,
+                    reference.source,
+                    reference.player_name,
+                    reference.created_at,
+                    reference.imported_at,
+                    json.dumps([telemetry_point_to_dict(point) for point in reference.telemetry_points]),
+                    json.dumps(reference.metadata),
+                ),
+            )
+            connection.commit()
+
+    def load_reference_laps(self) -> list[ReferenceLap]:
+        try:
+            with closing(self.connect()) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, game, track_id, track_display_name, car_id, car_display_name,
+                           lap_time_ms, source, player_name, created_at, imported_at,
+                           telemetry_json, metadata_json
+                    FROM reference_laps
+                    ORDER BY imported_at DESC
+                    """
+                ).fetchall()
+        except (sqlite3.DatabaseError, json.JSONDecodeError):
+            return []
+        references: list[ReferenceLap] = []
+        for row in rows:
+            try:
+                points = [TelemetryPoint(**point) for point in json.loads(row[11] or "[]") if isinstance(point, dict)]
+                metadata = json.loads(row[12] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                LOGGER.warning("Skipping malformed reference lap: id=%s", row[0])
+                continue
+            references.append(
+                ReferenceLap(
+                    id=row[0],
+                    game=row[1] or "",
+                    track_id=row[2] or "",
+                    track_display_name=row[3] or "",
+                    car_id=row[4] or "",
+                    car_display_name=row[5] or "",
+                    lap_time_ms=row[6],
+                    source=row[7] or "",
+                    player_name=row[8] or "",
+                    created_at=row[9] or "",
+                    imported_at=row[10] or "",
+                    telemetry_points=points,
+                    metadata=metadata if isinstance(metadata, dict) else {},
+                )
+            )
+        return references
+
+    def best_reference_lap(self, game: str, track_id: str | None, car_id: str | None) -> ReferenceLap | None:
+        game_key = (game or "").casefold()
+        track_key = track_id or ""
+        car_key = car_id or ""
+        candidates = [
+            reference
+            for reference in self.load_reference_laps()
+            if reference.game.casefold() == game_key
+            and reference.track_id == track_key
+            and reference.car_id == car_key
+            and reference.lap_time_ms is not None
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda reference: int(reference.lap_time_ms or 0))
+
 
 def sample_row(lap_id: str, index: int, sample: TelemetrySample) -> tuple:
     return (
@@ -424,3 +525,7 @@ def sample_to_dict(sample: TelemetrySample) -> dict:
 
 def sample_from_json(raw_json: str) -> TelemetrySample:
     return TelemetrySample(**json.loads(raw_json))
+
+
+def telemetry_point_to_dict(point: TelemetryPoint) -> dict:
+    return {field: getattr(point, field) for field in TelemetryPoint.__dataclass_fields__}
