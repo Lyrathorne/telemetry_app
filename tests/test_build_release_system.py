@@ -44,6 +44,13 @@ class BuildReleaseSystemTests(unittest.TestCase):
         self.assertIn('Join-Path $tempAppDir $targetExeName', script)
         self.assertNotIn('Join-Path $script:DistDir "$script:AppName.exe"', script)
 
+    def test_spec_relies_on_pyinstaller_hooks_for_heavy_dependencies(self) -> None:
+        spec = (ROOT / "RacingTelemetry.spec").read_text(encoding="utf-8")
+        self.assertNotIn("collect_data_files(\"PySide6\"", spec)
+        self.assertNotIn("collect_data_files(\"numpy\"", spec)
+        self.assertNotIn("collect_dynamic_libs(\"PySide6\"", spec)
+        self.assertNotIn("collect_dynamic_libs(\"numpy\"", spec)
+
     def test_windows_release_workflow_contract(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "build-windows-release.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", workflow)

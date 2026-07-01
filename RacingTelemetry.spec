@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 
 ROOT = Path(SPECPATH)
@@ -12,12 +12,7 @@ datas = []
 resources_dir = ROOT / "resources"
 if resources_dir.exists():
     datas.append((str(resources_dir), "resources"))
-datas += collect_data_files("PySide6", include_py_files=False)
-datas += collect_data_files("pyqtgraph", include_py_files=False)
-datas += collect_data_files("numpy", include_py_files=False)
-
-binaries = collect_dynamic_libs("PySide6")
-binaries += collect_dynamic_libs("numpy")
+binaries = []
 
 hiddenimports = []
 for package in ("app", "telemetry", "ui", "storage", "collectors", "parsers"):
