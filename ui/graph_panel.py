@@ -64,7 +64,7 @@ METRIC_DEFAULT_RANGES = {
     "brake_percent": (0.0, 100.0),
     "clutch_percent": (0.0, 100.0),
     "gear": (-1.0, 8.0),
-    "steering": (-100.0, 100.0),
+    "steering": (-1.0, 1.0),
 }
 
 METRIC_UNITS = {
@@ -74,7 +74,7 @@ METRIC_UNITS = {
     "brake_percent": "%",
     "clutch_percent": "%",
     "gear": "gear",
-    "steering": "steering",
+    "steering": "normalized",
 }
 
 
@@ -440,7 +440,25 @@ class GraphPanel(QWidget):
 
         all_x = np.array([self._sample_x(sample) for sample in self.samples], dtype=float)
         indices = np.arange(all_x.size)
+        finite_mask = np.isfinite(all_x)
+        if self._uses_distance_axis():
+            latest_lap = next((sample.lap_number for sample in reversed(self.samples) if sample.lap_number is not None), None)
+            if latest_lap is not None:
+                finite_mask &= np.array([sample.lap_number in (None, latest_lap) for sample in self.samples], dtype=bool)
+            track_length = self._track_length_m()
+            if track_length is not None:
+                finite_mask &= (all_x >= 0.0) & (all_x <= track_length + 1.0)
+        all_x = all_x[finite_mask]
+        indices = indices[finite_mask]
+        if all_x.size == 0:
+            return all_x, indices
+        if self._uses_distance_axis() and all_x.size:
+            order = np.argsort(all_x, kind="stable")
+            all_x = all_x[order]
+            indices = indices[order]
         mode = self.x_mode_combo.currentData()
+        if self._uses_distance_axis() and self._track_length_m() is not None:
+            return all_x, indices
         if mode in {"follow_live", "recent_window"}:
             latest = float(all_x[-1])
             minimum = max(0.0, latest - float(self.recent_window_seconds.value()))
@@ -491,6 +509,10 @@ class GraphPanel(QWidget):
         mode = self.x_mode_combo.currentData()
         if not self.samples:
             self.plot_widget.setXRange(0.0, 10.0, padding=0.0)
+            return
+        track_length = self._track_length_m()
+        if self._uses_distance_axis() and track_length is not None:
+            self.plot_widget.setXRange(0.0, track_length, padding=0.0)
             return
         latest = self._sample_x(self.samples[-1])
         if mode == "full_session":
@@ -570,7 +592,8 @@ class GraphPanel(QWidget):
 
     def _sample_absolute_x(self, sample: TelemetrySample) -> float:
         if sample.lap_distance is not None:
-            return max(0.0, float(sample.lap_distance))
+            value = float(sample.lap_distance)
+            return value if np.isfinite(value) else np.nan
         if sample.session_time is not None:
             return max(0.0, float(sample.session_time))
         return max(0.0, float(sample.timestamp))
@@ -585,6 +608,16 @@ class GraphPanel(QWidget):
 
     def _uses_distance_axis(self) -> bool:
         return any(sample.lap_distance is not None for sample in self.samples)
+
+    def _track_length_m(self) -> float | None:
+        lengths = [
+            float(sample.track_length_m)
+            for sample in self.samples
+            if sample.track_length_m is not None and np.isfinite(float(sample.track_length_m)) and float(sample.track_length_m) > 0.0
+        ]
+        if not lengths:
+            return None
+        return max(lengths)
 
     def _update_stats_label(self) -> None:
         latency = "--" if self.diagnostics.latest_latency_ms == 0.0 else f"{self.diagnostics.latest_latency_ms:.1f}"

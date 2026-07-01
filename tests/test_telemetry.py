@@ -15,6 +15,7 @@ from telemetry.assetto_corsa_competizione import (
     GRAPHICS_LAST_TIME_TEXT_OFFSET,
     GRAPHICS_LAST_TIME_OFFSET,
     GRAPHICS_CAR_COORDINATES_OFFSET,
+    GRAPHICS_DISTANCE_TRAVELED_OFFSET,
     GRAPHICS_NORMALIZED_POSITION_OFFSET,
     GRAPHICS_SPLIT_TEXT_OFFSET,
     GRAPHICS_HEADER_FORMAT,
@@ -22,9 +23,11 @@ from telemetry.assetto_corsa_competizione import (
     MAP_NAMES,
     PHYSICS_MAP_SIZE,
     STATIC_MAP_SIZE,
+    normalize_steering,
     parse_acc_time_text,
     read_acc_graphics,
 )
+from telemetry.lap_distance import distance_from_normalized_progress, validate_lap_distance
 from telemetry.f1_2018 import (
     F1_2018_CAR_TELEMETRY_PACKET_ID,
     F1_2018_CAR_TELEMETRY_PACKET_SIZE,
@@ -190,6 +193,7 @@ class TelemetryTests(unittest.TestCase):
         struct.pack_into("=i", packet, GRAPHICS_LAST_TIME_OFFSET, -1)
         struct.pack_into("=i", packet, GRAPHICS_CURRENT_SECTOR_OFFSET, 2)
         struct.pack_into("=i", packet, GRAPHICS_LAST_SECTOR_TIME_OFFSET, 42851)
+        struct.pack_into("=f", packet, GRAPHICS_DISTANCE_TRAVELED_OFFSET, 12345.0)
         struct.pack_into("=f", packet, GRAPHICS_NORMALIZED_POSITION_OFFSET, 0.75)
         struct.pack_into("=fff", packet, GRAPHICS_CAR_COORDINATES_OFFSET, 10.0, 2.0, -5.0)
 
@@ -202,6 +206,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(graphics["current_sector_index"], 2)
         self.assertEqual(graphics["current_split_time_ms"], 74135)
         self.assertEqual(graphics["last_sector_time_ms"], 42851)
+        self.assertAlmostEqual(graphics["distance_traveled_m"], 12345.0)
+        self.assertIsNone(graphics["lap_distance_m"])
         self.assertEqual(graphics["normalized_track_position"], 0.75)
         self.assertEqual(graphics["car_coordinates"], (10.0, 2.0, -5.0))
 
@@ -247,6 +253,21 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(format_time_ms(130405), "02:10.405")
         self.assertEqual(format_time_ms(146020), "02:26.020")
         self.assertEqual(format_time_ms(3723004), "1:02:03.004")
+
+    def test_acc_lap_distance_uses_normalized_progress_and_rejects_session_distance(self) -> None:
+        derived = distance_from_normalized_progress(0.5, 5793, lap_number=3)
+        self.assertEqual(derived.source, "normalized_progress")
+        self.assertAlmostEqual(derived.lap_distance_m or 0.0, 2896.5)
+        rejected = validate_lap_distance(12_345.0, 5793.0, previous_distance_m=100.0, lap_number=3)
+        self.assertIsNone(rejected.lap_distance_m)
+        self.assertEqual(rejected.rejected_reason, "out_of_range")
+
+    def test_acc_steering_keeps_sign_and_normalized_range(self) -> None:
+        self.assertEqual(normalize_steering(0.0), 0.0)
+        self.assertEqual(normalize_steering(-0.4), -0.4)
+        self.assertEqual(normalize_steering(0.7), 0.7)
+        self.assertEqual(normalize_steering(4.0), 1.0)
+        self.assertIsNone(normalize_steering(float("nan")))
 
 
 class BytesMapping:

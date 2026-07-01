@@ -11,7 +11,7 @@ from app.paths import data_dir, ensure_user_directories
 from models import LapResult, ReferenceLap, SectorResult, SessionSummary, TelemetryPoint, TelemetrySample
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LOGGER = logging.getLogger(__name__)
 
 
@@ -49,6 +49,9 @@ class LapStorage:
                     id TEXT PRIMARY KEY,
                     game TEXT NOT NULL,
                     track TEXT,
+                    track_metadata_id TEXT,
+                    track_length_m REAL,
+                    track_length_source TEXT,
                     car TEXT,
                     driver_name TEXT,
                     source_type TEXT,
@@ -96,6 +99,9 @@ class LapStorage:
                     session_time REAL,
                     lap_time REAL,
                     lap_distance REAL,
+                    track_length_m REAL,
+                    track_metadata_id TEXT,
+                    track_length_source TEXT,
                     normalized_track_position REAL,
                     speed_kmh REAL,
                     rpm REAL,
@@ -142,7 +148,21 @@ class LapStorage:
                 connection.execute("ALTER TABLE laps ADD COLUMN fully_observed INTEGER NOT NULL DEFAULT 1")
             if "raw_samples_recorded" not in lap_columns:
                 connection.execute("ALTER TABLE laps ADD COLUMN raw_samples_recorded INTEGER NOT NULL DEFAULT 0")
+            for column, definition in (
+                ("track_metadata_id", "TEXT"),
+                ("track_length_m", "REAL"),
+                ("track_length_source", "TEXT"),
+            ):
+                if column not in lap_columns:
+                    connection.execute(f"ALTER TABLE laps ADD COLUMN {column} {definition}")
             sample_columns = {row[1] for row in connection.execute("PRAGMA table_info(lap_samples)")}
+            for column, definition in (
+                ("track_length_m", "REAL"),
+                ("track_metadata_id", "TEXT"),
+                ("track_length_source", "TEXT"),
+            ):
+                if column not in sample_columns:
+                    connection.execute(f"ALTER TABLE lap_samples ADD COLUMN {column} {definition}")
             for column in ("world_position_x", "world_position_y", "world_position_z"):
                 if column not in sample_columns:
                     connection.execute(f"ALTER TABLE lap_samples ADD COLUMN {column} REAL")
@@ -229,8 +249,9 @@ class LapStorage:
                 """
                 INSERT OR REPLACE INTO laps
                 (id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
-                 car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 track_metadata_id, track_length_m, track_length_source, car, driver_name,
+                 started_at, completed_at, notes, fully_observed, raw_samples_recorded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lap.id,
@@ -241,6 +262,9 @@ class LapStorage:
                     int(lap.complete),
                     lap.game,
                     lap.track,
+                    lap.track_metadata_id,
+                    lap.track_length_m,
+                    lap.track_length_source,
                     lap.car,
                     lap.driver_name,
                     lap.started_at,
@@ -276,9 +300,10 @@ class LapStorage:
                 """
                 INSERT INTO lap_samples
                 (lap_id, sample_index, timestamp, session_time, lap_time, lap_distance,
+                 track_length_m, track_metadata_id, track_length_source,
                  normalized_track_position, speed_kmh, rpm, gear, throttle_percent, brake_percent,
                  clutch_percent, steering, world_position_x, world_position_y, world_position_z, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     sample_row(lap.id, index, sample)
@@ -310,7 +335,8 @@ class LapStorage:
         lap_rows = connection.execute(
             """
             SELECT id, session_id, lap_number, lap_time_ms, valid, complete, game, track,
-                   car, driver_name, started_at, completed_at, notes, fully_observed, raw_samples_recorded
+                   track_metadata_id, track_length_m, track_length_source, car, driver_name,
+                   started_at, completed_at, notes, fully_observed, raw_samples_recorded
             FROM laps
             ORDER BY started_at DESC, lap_number DESC
             """
@@ -353,13 +379,16 @@ class LapStorage:
                     complete=bool(row[5]),
                     game=row[6],
                     track=row[7],
-                    car=row[8],
-                    driver_name=row[9],
-                    started_at=row[10],
-                    completed_at=row[11],
-                    notes=row[12] or "",
-                    fully_observed=bool(row[13]),
-                    raw_samples_recorded=bool(row[14]),
+                    track_metadata_id=row[8],
+                    track_length_m=row[9],
+                    track_length_source=row[10],
+                    car=row[11],
+                    driver_name=row[12],
+                    started_at=row[13],
+                    completed_at=row[14],
+                    notes=row[15] or "",
+                    fully_observed=bool(row[16]),
+                    raw_samples_recorded=bool(row[17]),
                     sectors=sectors,
                     samples=samples,
                 )
@@ -514,6 +543,9 @@ def sample_row(lap_id: str, index: int, sample: TelemetrySample) -> tuple:
         sample.session_time,
         sample.lap_time,
         sample.lap_distance,
+        sample.track_length_m,
+        sample.track_metadata_id,
+        sample.track_length_source,
         sample.normalized_track_position,
         sample.speed_kmh,
         sample.rpm,

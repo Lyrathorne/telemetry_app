@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Misano World Circuit Marco Simoncelli</title>
+  <desc id="desc">Original simplified schematic top view. Not survey-grade geometry.</desc>
+  <rect width="512" height="512" fill="white"/>
+  <polyline points="459.42,471.04 471.04,331.55 412.92,261.81 308.31,273.44 273.44,203.69 343.18,133.95 319.93,52.58 226.94,40.96 180.45,122.33 99.08,99.08 40.96,180.45 64.21,285.06 145.57,319.93 122.33,401.30 215.32,471.04 331.55,436.17 459.42,471.04" fill="none" stroke="#111827" stroke-width="18" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="459.42" cy="471.04" r="12" fill="#ffffff" stroke="#111827" stroke-width="6"/>
+  <text x="24" y="456" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#111827">Misano World Circuit Marco Simoncelli</text>
+  <text x="24" y="486" font-family="Arial, sans-serif" font-size="16" fill="#4b5563">4200 m · schematic fallback</text>
+</svg>

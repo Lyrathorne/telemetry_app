@@ -19,6 +19,9 @@ class TelemetrySample:
     lap_number: int | None = None
     lap_time: float | None = None
     lap_distance: float | None = None
+    track_length_m: float | None = None
+    track_metadata_id: str | None = None
+    track_length_source: str | None = None
     normalized_track_position: float | None = None
     current_lap_time_ms: int | None = None
     completed_laps: int | None = None
@@ -132,6 +135,9 @@ class LapResult:
     driver_name: str | None = None
     game: str = ""
     track: str | None = None
+    track_metadata_id: str | None = None
+    track_length_m: float | None = None
+    track_length_source: str | None = None
     car: str | None = None
     session_id: str = ""
     sectors: list[SectorResult] = field(default_factory=list)

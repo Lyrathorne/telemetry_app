@@ -62,7 +62,7 @@ class GraphPanelTests(unittest.TestCase):
         self.assertEqual(combined_metric_default_range(["throttle_percent"]), (0.0, 100.0))
         self.assertEqual(combined_metric_default_range(["brake_percent"]), (0.0, 100.0))
         self.assertEqual(combined_metric_default_range(["clutch_percent"]), (0.0, 100.0))
-        self.assertEqual(combined_metric_default_range(["steering"]), (-100.0, 100.0))
+        self.assertEqual(combined_metric_default_range(["steering"]), (-1.0, 1.0))
         self.assertGreaterEqual(auto_y_range(["speed_kmh"], [], True)[0], 0.0)
         self.assertGreaterEqual(auto_y_range(["rpm"], [], True)[0], 0.0)
 
@@ -80,6 +80,15 @@ class GraphPanelTests(unittest.TestCase):
         self.assertEqual(panel._sample_x(panel.samples[0]), 12.5)
         self.assertEqual(panel._sample_x(panel.samples[1]), 27.0)
         self.assertTrue(panel._uses_distance_axis())
+
+    def test_distance_axis_is_limited_to_track_length_and_latest_lap(self) -> None:
+        panel = GraphPanel("Test", 50, 100)
+        panel.add_sample(TelemetrySample(timestamp=1.0, lap_number=1, lap_distance=100.0, track_length_m=5000.0, speed_kmh=10.0))
+        panel.add_sample(TelemetrySample(timestamp=2.0, lap_number=2, lap_distance=50.0, track_length_m=5000.0, speed_kmh=20.0))
+        panel.add_sample(TelemetrySample(timestamp=3.0, lap_number=2, lap_distance=6000.0, track_length_m=5000.0, speed_kmh=30.0))
+        visible_x, visible_indices = panel._visible_x_values()
+        self.assertEqual(visible_x.tolist(), [50.0])
+        self.assertEqual(visible_indices.tolist(), [1])
 
     def test_full_session_history_does_not_discard_old_samples(self) -> None:
         panel = GraphPanel("Test", 50, 100)
@@ -191,6 +200,18 @@ class GraphPanelTests(unittest.TestCase):
             ]
         )
         self.assertEqual(points.tolist(), [[1.0, 2.0], [3.0, 4.0]])
+
+    def test_trajectory_points_filter_non_finite_and_break_teleports(self) -> None:
+        points = trajectory_points(
+            [
+                TelemetrySample(world_position_x=1.0, world_position_z=2.0),
+                TelemetrySample(world_position_x=float("nan"), world_position_z=3.0),
+                TelemetrySample(world_position_x=1000.0, world_position_z=1000.0),
+            ]
+        )
+        self.assertEqual(points.shape, (3, 2))
+        self.assertTrue(points[1, 0] != points[1, 0])
+        self.assertEqual(points[-1].tolist(), [1000.0, 1000.0])
 
 
 if __name__ == "__main__":

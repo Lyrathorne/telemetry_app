@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover
 
 
 MAX_MAP_POINTS = 5000
+TELEPORT_GAP_M = 250.0
 
 
 class TrackMapPanel(QWidget):
@@ -75,11 +76,19 @@ class TrackMapPanel(QWidget):
 
 
 def trajectory_points(samples: list[TelemetrySample]) -> np.ndarray:
-    points = [
-        (float(sample.world_position_x), float(sample.world_position_z))
-        for sample in samples
-        if sample.world_position_x is not None and sample.world_position_z is not None
-    ]
+    points = []
+    previous: tuple[float, float] | None = None
+    for sample in samples:
+        if sample.world_position_x is None or sample.world_position_z is None:
+            continue
+        x = float(sample.world_position_x)
+        z = float(sample.world_position_z)
+        if not np.isfinite(x) or not np.isfinite(z):
+            continue
+        if previous is not None and float(np.hypot(x - previous[0], z - previous[1])) > TELEPORT_GAP_M:
+            points.append((np.nan, np.nan))
+        points.append((x, z))
+        previous = (x, z)
     if not points:
         return np.empty((0, 2), dtype=float)
     return np.array(points, dtype=float)

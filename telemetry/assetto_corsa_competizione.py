@@ -2,11 +2,14 @@ import struct
 import time
 import logging
 import os
+import math
 
 from PySide6.QtCore import QObject, QTimer
 
 from models import TelemetrySample
 from telemetry.base import SourceState, TelemetrySource
+from telemetry.lap_distance import distance_from_normalized_progress, validate_lap_distance
+from telemetry.track_metadata import TrackMetadataRepository
 from telemetry.windows_shared_memory import NamedSharedMemory
 from telemetry.time_utils import parse_racing_time_to_ms
 
@@ -78,6 +81,8 @@ class AccTelemetrySource(TelemetrySource):
         self._last_packet_id: int | None = None
         self._last_sample_time = 0.0
         self._last_timing_diagnostics: tuple | None = None
+        self._last_lap_distance_m: float | None = None
+        self._track_repository = TrackMetadataRepository()
         self._timing_diagnostics_enabled = os.environ.get("RACING_TELEMETRY_ACC_TIMING_DIAGNOSTICS") == "1"
         self._logger = logging.getLogger(__name__)
 
@@ -178,6 +183,32 @@ class AccTelemetrySource(TelemetrySource):
         self._set_state(SourceState.CONNECTED, "Connected")
         if self._timing_diagnostics_enabled:
             self._log_timing_transition(graphics)
+        track_definition = self._track_repository.find_by_acc_id(statics["track_name"]) or self._track_repository.find_by_alias(statics["track_name"])
+        track_length_m = track_definition.track_length_m if track_definition else None
+        lap_number = int(graphics["completed_laps"]) + 1 if graphics.get("completed_laps") is not None else None
+        lap_distance = distance_from_normalized_progress(
+            graphics.get("normalized_track_position"),
+            track_length_m,
+            lap_number=lap_number,
+        )
+        if lap_distance.lap_distance_m is None:
+            lap_distance = validate_lap_distance(
+                graphics.get("lap_distance_m"),
+                track_length_m,
+                self._last_lap_distance_m,
+                lap_number,
+            )
+        if lap_distance.lap_distance_m is not None:
+            self._last_lap_distance_m = lap_distance.lap_distance_m
+        elif lap_distance.rejected_reason:
+            self._logger.warning(
+                "ACC lap distance unavailable: track=%r raw_session_distance=%r normalized=%r length=%r reason=%s",
+                statics["track_name"],
+                graphics.get("distance_traveled_m"),
+                graphics.get("normalized_track_position"),
+                track_length_m,
+                lap_distance.rejected_reason,
+            )
         self.sample_received.emit(
             TelemetrySample(
                 speed_kmh=max(0.0, physics["speed_kmh"]),
@@ -185,12 +216,13 @@ class AccTelemetrySource(TelemetrySource):
                 gear=normalize_acc_gear(physics["gear"]),
                 throttle_percent=to_percent(physics["gas"]),
                 brake_percent=to_percent(physics["brake"]),
-                steering=physics.get("steering"),
+                steering=normalize_steering(physics.get("steering")),
                 source_name=self.display_name,
                 car_name=statics["car_name"],
                 track_name=statics["track_name"],
                 session_state=status_name,
                 timestamp=time.time(),
+                lap_number=lap_number,
                 current_lap_time_ms=graphics.get("current_lap_time_ms"),
                 last_lap_time_ms=graphics.get("last_lap_time_ms"),
                 best_lap_time_ms=graphics.get("best_lap_time_ms"),
@@ -198,7 +230,10 @@ class AccTelemetrySource(TelemetrySource):
                 current_sector_index=graphics.get("current_sector_index"),
                 current_split_time_ms=graphics.get("current_split_time_ms"),
                 last_sector_time_ms=graphics.get("last_sector_time_ms"),
-                lap_distance=graphics.get("distance_traveled_m"),
+                lap_distance=lap_distance.lap_distance_m,
+                track_length_m=track_length_m,
+                track_metadata_id=track_definition.track_id if track_definition else None,
+                track_length_source=lap_distance.source if lap_distance.lap_distance_m is not None else None,
                 normalized_track_position=graphics.get("normalized_track_position"),
                 world_position_x=component_or_none(graphics.get("car_coordinates"), 0),
                 world_position_y=component_or_none(graphics.get("car_coordinates"), 1),
@@ -251,6 +286,7 @@ class AccTelemetrySource(TelemetrySource):
     def _close_maps(self) -> None:
         self._last_packet_id = None
         self._last_sample_time = 0.0
+        self._last_lap_distance_m = None
 
         for mapping_name in ("_physics_map", "_graphics_map", "_static_map"):
             mapping = getattr(self, mapping_name)
@@ -290,11 +326,11 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
     last_lap_time_text_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_LAST_TIME_TEXT_OFFSET, 15))
     best_lap_time_text_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_BEST_TIME_TEXT_OFFSET, 15))
     current_split_time_ms = parse_acc_time_text(read_utf16(mapping, GRAPHICS_SPLIT_TEXT_OFFSET, 15))
-    distance_traveled_m = read_float32(mapping, GRAPHICS_DISTANCE_TRAVELED_OFFSET)
+    distance_traveled_m = finite_float_or_none(read_float32(mapping, GRAPHICS_DISTANCE_TRAVELED_OFFSET))
     is_in_pit = bool(read_int32(mapping, GRAPHICS_IS_IN_PIT_OFFSET))
     current_sector_index = read_int32(mapping, GRAPHICS_CURRENT_SECTOR_OFFSET)
     last_sector_time_ms = read_int32(mapping, GRAPHICS_LAST_SECTOR_TIME_OFFSET)
-    normalized_position = read_float32(mapping, GRAPHICS_NORMALIZED_POSITION_OFFSET)
+    normalized_position = finite_float_or_none(read_float32(mapping, GRAPHICS_NORMALIZED_POSITION_OFFSET))
     car_coordinates = read_vector3(mapping, GRAPHICS_CAR_COORDINATES_OFFSET)
     return {
         "packet_id": int(packet_id),
@@ -309,7 +345,8 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
         "best_lap_time_ms": first_time_or_none(best_lap_time_text_ms, best_lap_time_raw),
         "current_split_time_ms": positive_time_or_none(current_split_time_ms),
         "last_sector_time_ms": positive_time_or_none(last_sector_time_ms),
-        "distance_traveled_m": max(0.0, float(distance_traveled_m)),
+        "distance_traveled_m": distance_traveled_m,
+        "lap_distance_m": None,
         "normalized_track_position": normalized_position if 0.0 <= normalized_position <= 1.0 else None,
         "car_coordinates": car_coordinates,
         "is_in_pit": is_in_pit,
@@ -356,7 +393,15 @@ def read_vector3(mapping: NamedSharedMemory, offset: int) -> tuple[float, float,
 def component_or_none(vector: tuple[float, float, float] | None, index: int) -> float | None:
     if vector is None:
         return None
-    return float(vector[index])
+    value = float(vector[index])
+    return value if math.isfinite(value) else None
+
+
+def finite_float_or_none(value: float | None) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
 
 
 def positive_time_or_none(value: int | None) -> int | None:
@@ -387,6 +432,15 @@ def normalize_acc_gear(raw_gear: int) -> int:
 
 def to_percent(value: float) -> float:
     return max(0.0, min(100.0, value * 100.0))
+
+
+def normalize_steering(value: float | None) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    if not math.isfinite(value):
+        return None
+    return max(-1.0, min(1.0, value))
 
 
 def readable_error(error: BaseException) -> str:
