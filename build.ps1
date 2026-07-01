@@ -1,6 +1,7 @@
 param(
     [ValidateSet("Debug", "Release")]
     [string] $Configuration = "Release",
+    [string] $PythonPath,
     [switch] $SkipTests
 )
 
@@ -41,11 +42,18 @@ function Write-Stage {
 function Fail-Build {
     param(
         [string] $Message,
-        [int] $Code = 1
+        [int] $Code = 1,
+        [string[]] $NotStartedStages = @()
     )
     Write-Log ""
     Write-Log "Build failed during: $script:Stage" Red
     Write-Log $Message Red
+    if ($NotStartedStages.Count -gt 0) {
+        Write-Log "Build stages not started:" Yellow
+        foreach ($stageName in $NotStartedStages) {
+            Write-Log "- $stageName" Yellow
+        }
+    }
     Write-Log "Log: $script:LogPath"
     if (Test-Path -LiteralPath $script:FinalDistDir) {
         Write-Log "Existing dist was preserved: $script:FinalDistDir"
@@ -58,6 +66,17 @@ function Fail-Build {
         Write-Log "dist_new does not exist."
     }
     exit $Code
+}
+
+function Fail-Environment {
+    param([string] $Message)
+    Fail-Build $Message 1 @(
+        "dependency installation",
+        "tests",
+        "PyInstaller",
+        "smoke test",
+        "release packaging"
+    )
 }
 
 function Invoke-External {
@@ -158,25 +177,249 @@ function Invoke-WithRetry {
     throw $lastError
 }
 
-function Get-ProjectPython {
-    $venvPython = Join-Path $script:Root ".venv\Scripts\python.exe"
-    $legacyVenvPython = Join-Path $script:Root ".venv.venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $venvPython) {
-        return $venvPython
+function Test-WindowsAppsPython {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
     }
-    if (Test-Path -LiteralPath $legacyVenvPython) {
-        return $legacyVenvPython
+    return ($Path -match '\\AppData\\Local\\Microsoft\\WindowsApps\\python(\d+(\.\d+)*)?\.exe$')
+}
+
+function Get-ResolvedCommandPath {
+    param([string] $Command)
+    if ([string]::IsNullOrWhiteSpace($Command)) {
+        return $null
+    }
+    if (Test-Path -LiteralPath $Command -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $Command).Path
+    }
+    $found = Get-Command $Command -ErrorAction SilentlyContinue
+    if ($null -eq $found) {
+        return $null
+    }
+    return $found.Source
+}
+
+function New-PythonCandidate {
+    param(
+        [string] $Label,
+        [string] $Command,
+        [string[]] $Arguments = @(),
+        [switch] $Required
+    )
+    [pscustomobject]@{
+        Label = $Label
+        Command = $Command
+        Arguments = @($Arguments)
+        Required = [bool] $Required
+    }
+}
+
+function Test-PythonCandidate {
+    param($Candidate)
+
+    $resolvedCommand = Get-ResolvedCommandPath $Candidate.Command
+    Write-Log "Python candidate: $($Candidate.Label)"
+    Write-Log "Python command: $($Candidate.Command)"
+    if ($Candidate.Arguments.Count -gt 0) {
+        Write-Log "Python command arguments: $($Candidate.Arguments -join ' ')"
+    }
+    if ($resolvedCommand) {
+        Write-Log "Python command path: $resolvedCommand"
     }
 
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $pythonCommand) {
-        Fail-Build "Python was not found. Build the release on a development machine with Python installed."
+    if (-not $resolvedCommand) {
+        Write-Log "Python executable: "
+        Write-Log "Python version: "
+        Write-Log "Python architecture: "
+        Write-Log "Candidate rejected: command was not found" Yellow
+        Write-Log "Reason: command was not found"
+        return $null
     }
-    if ($pythonCommand.Source -like "*WindowsApps*") {
-        Fail-Build "Refusing to create .venv from WindowsApps python shim: $($pythonCommand.Source)"
+
+    if (Test-WindowsAppsPython $resolvedCommand) {
+        Write-Log "Python executable: $resolvedCommand"
+        Write-Log "Python version: "
+        Write-Log "Python architecture: "
+        Write-Log "Candidate rejected: WindowsApps alias" Yellow
+        Write-Log "Reason: The WindowsApps python.exe entry is only a Microsoft Store alias and cannot be used for this build."
+        return $null
     }
-    Write-Log "No project .venv was found. Creating .venv with: $($pythonCommand.Source)"
-    Invoke-External -Name "create .venv" -FilePath $pythonCommand.Source -Arguments @("-m", "venv", ".venv")
+
+    $probe = "import sys, struct; print(sys.executable); print(sys.version.replace(chr(10), ' ')); print(struct.calcsize('P') * 8)"
+    $probeArgs = @($Candidate.Arguments) + @("-c", $probe)
+    $output = @()
+    $exitCode = 0
+    try {
+        $output = & $resolvedCommand @probeArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $output = @($_.Exception.Message)
+        $exitCode = 1
+    }
+
+    if ($exitCode -ne 0 -or $output.Count -lt 3) {
+        Write-Log "Python executable: "
+        Write-Log "Python version: "
+        Write-Log "Python architecture: "
+        Write-Log "Candidate rejected: probe command failed" Yellow
+        Write-Log "Reason: python probe exited with code $exitCode. $($output -join ' ')"
+        return $null
+    }
+
+    $executable = [string] $output[0]
+    $version = [string] $output[1]
+    $architecture = [string] $output[2]
+    Write-Log "Python executable: $executable"
+    Write-Log "Python version: $version"
+    Write-Log "Python architecture: $architecture"
+
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        Write-Log "Candidate rejected: sys.executable does not point to an existing file" Yellow
+        Write-Log "Reason: sys.executable was $executable"
+        return $null
+    }
+    if (Test-WindowsAppsPython $executable) {
+        Write-Log "Candidate rejected: WindowsApps alias" Yellow
+        Write-Log "Reason: sys.executable points to the Microsoft Store alias."
+        return $null
+    }
+    if ($architecture -ne "64") {
+        Write-Log "Candidate rejected: unsupported architecture" Yellow
+        Write-Log "Reason: expected 64-bit Python, got $architecture-bit."
+        return $null
+    }
+    if ($version -notmatch '^3\.(11|12|13|14)\.') {
+        Write-Log "Candidate rejected: unsupported Python version" Yellow
+        Write-Log "Reason: expected Python 3.11, 3.12, 3.13, or 3.14."
+        return $null
+    }
+
+    Write-Log "Candidate accepted: $executable" Green
+    Write-Log "Reason: usable 64-bit Python."
+    [pscustomobject]@{
+        Command = $resolvedCommand
+        Arguments = @($Candidate.Arguments)
+        Executable = $executable
+        Version = $version
+        Architecture = $architecture
+        Label = $Candidate.Label
+    }
+}
+
+function Get-PythonCandidates {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($PythonPath)) {
+        $candidates += New-PythonCandidate -Label "explicit -PythonPath" -Command $PythonPath -Required
+    }
+
+    $venvPython = Join-Path $script:Root ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        $candidates += New-PythonCandidate -Label "project .venv" -Command $venvPython
+    }
+
+    $pyLauncher = Get-ResolvedCommandPath "py"
+    if ($pyLauncher) {
+        $candidates += New-PythonCandidate -Label "Python Launcher py -3.13" -Command $pyLauncher -Arguments @("-3.13")
+        $candidates += New-PythonCandidate -Label "Python Launcher py -3.12" -Command $pyLauncher -Arguments @("-3.12")
+        $candidates += New-PythonCandidate -Label "Python Launcher py -3.11" -Command $pyLauncher -Arguments @("-3.11")
+    }
+
+    $pathPython = Get-ResolvedCommandPath "python"
+    if ($pathPython) {
+        $candidates += New-PythonCandidate -Label "python.exe from PATH" -Command $pathPython
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        foreach ($versionDir in @("Python313", "Python312", "Python311")) {
+            $candidatePath = Join-Path $env:LOCALAPPDATA "Programs\Python\$versionDir\python.exe"
+            if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+                $candidates += New-PythonCandidate -Label "standard install $versionDir" -Command $candidatePath
+            }
+        }
+    }
+
+    $systemCandidates = @(
+        "$env:ProgramFiles\Python313\python.exe",
+        "$env:ProgramFiles\Python312\python.exe",
+        "$env:ProgramFiles\Python311\python.exe",
+        "${env:ProgramFiles(x86)}\Python313\python.exe",
+        "${env:ProgramFiles(x86)}\Python312\python.exe",
+        "${env:ProgramFiles(x86)}\Python311\python.exe",
+        "C:\Python313\python.exe",
+        "C:\Python312\python.exe",
+        "C:\Python311\python.exe"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($candidatePath in $systemCandidates) {
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+            $candidates += New-PythonCandidate -Label "system install $(Split-Path -Leaf (Split-Path -Parent $candidatePath))" -Command $candidatePath
+        }
+    }
+
+    return $candidates
+}
+
+function Get-ProjectPython {
+    $venvPython = Join-Path $script:Root ".venv\Scripts\python.exe"
+    $candidates = Get-PythonCandidates
+    $accepted = $null
+    foreach ($candidate in $candidates) {
+        $accepted = Test-PythonCandidate $candidate
+        if ($accepted) {
+            break
+        }
+        if ($candidate.Required) {
+            break
+        }
+    }
+
+    if (-not $accepted) {
+        $message = @"
+Primary failure: Python environment discovery
+
+No usable 64-bit Python installation was found.
+
+The WindowsApps python.exe entry is only a Microsoft Store alias and cannot be used for this build.
+
+Install 64-bit Python from python.org or pass its path explicitly:
+
+.\build.ps1 -PythonPath "C:\Path\To\python.exe"
+
+End users do not need Python. Python is required only to build the application.
+"@
+        Fail-Environment $message
+    }
+
+    if ((Test-Path -LiteralPath $venvPython -PathType Leaf) -and ((Resolve-Path -LiteralPath $venvPython).Path -ieq (Resolve-Path -LiteralPath $accepted.Executable).Path)) {
+        Write-Log "Using existing project .venv: $venvPython" Green
+        return $venvPython
+    }
+
+    if (($accepted.Label -eq "explicit -PythonPath") -and -not (Test-Path -LiteralPath (Join-Path $script:Root ".venv") -PathType Container)) {
+        Write-Log "No project .venv was found. Creating .venv with explicit PythonPath: $($accepted.Executable)"
+        Invoke-External -Name "create .venv" -FilePath $accepted.Command -Arguments (@($accepted.Arguments) + @("-m", "venv", ".venv"))
+        $venvCheck = Test-PythonCandidate (New-PythonCandidate -Label "newly created project .venv" -Command $venvPython -Required)
+        if (-not $venvCheck) {
+            Fail-Environment "The project .venv was created, but .venv\Scripts\python.exe failed validation."
+        }
+        return $venvPython
+    }
+
+    if ($accepted.Label -eq "explicit -PythonPath") {
+        Write-Log "Using explicit PythonPath: $($accepted.Executable)" Green
+        return $accepted.Executable
+    }
+
+    if (Test-Path -LiteralPath (Join-Path $script:Root ".venv") -PathType Container) {
+        Fail-Environment "A project .venv exists but its Python interpreter was not usable. Remove or recreate only this project's .venv after reviewing the candidate log above: $(Join-Path $script:Root ".venv")"
+    }
+
+    Write-Log "No project .venv was found. Creating .venv with: $($accepted.Executable)"
+    Invoke-External -Name "create .venv" -FilePath $accepted.Command -Arguments (@($accepted.Arguments) + @("-m", "venv", ".venv"))
+    $venvCheck = Test-PythonCandidate (New-PythonCandidate -Label "newly created project .venv" -Command $venvPython -Required)
+    if (-not $venvCheck) {
+        Fail-Environment "The project .venv was created, but .venv\Scripts\python.exe failed validation."
+    }
     return $venvPython
 }
 
