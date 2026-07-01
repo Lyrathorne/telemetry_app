@@ -11,7 +11,7 @@ from app.paths import data_dir, ensure_user_directories
 from models import LapResult, ReferenceLap, SectorResult, SessionSummary, TelemetryPoint, TelemetrySample
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 LOGGER = logging.getLogger(__name__)
 
 
@@ -104,6 +104,9 @@ class LapStorage:
                     brake_percent REAL,
                     clutch_percent REAL,
                     steering REAL,
+                    world_position_x REAL,
+                    world_position_y REAL,
+                    world_position_z REAL,
                     raw_json TEXT NOT NULL,
                     FOREIGN KEY(lap_id) REFERENCES laps(id) ON DELETE CASCADE
                 );
@@ -139,6 +142,10 @@ class LapStorage:
                 connection.execute("ALTER TABLE laps ADD COLUMN fully_observed INTEGER NOT NULL DEFAULT 1")
             if "raw_samples_recorded" not in lap_columns:
                 connection.execute("ALTER TABLE laps ADD COLUMN raw_samples_recorded INTEGER NOT NULL DEFAULT 0")
+            sample_columns = {row[1] for row in connection.execute("PRAGMA table_info(lap_samples)")}
+            for column in ("world_position_x", "world_position_y", "world_position_z"):
+                if column not in sample_columns:
+                    connection.execute(f"ALTER TABLE lap_samples ADD COLUMN {column} REAL")
             connection.execute(
                 """
                 DELETE FROM sectors
@@ -270,8 +277,8 @@ class LapStorage:
                 INSERT INTO lap_samples
                 (lap_id, sample_index, timestamp, session_time, lap_time, lap_distance,
                  normalized_track_position, speed_kmh, rpm, gear, throttle_percent, brake_percent,
-                 clutch_percent, steering, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 clutch_percent, steering, world_position_x, world_position_y, world_position_z, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     sample_row(lap.id, index, sample)
@@ -515,6 +522,9 @@ def sample_row(lap_id: str, index: int, sample: TelemetrySample) -> tuple:
         sample.brake_percent,
         sample.clutch_percent,
         sample.steering,
+        sample.world_position_x,
+        sample.world_position_y,
+        sample.world_position_z,
         json.dumps(sample_to_dict(sample)),
     )
 
@@ -524,7 +534,9 @@ def sample_to_dict(sample: TelemetrySample) -> dict:
 
 
 def sample_from_json(raw_json: str) -> TelemetrySample:
-    return TelemetrySample(**json.loads(raw_json))
+    data = json.loads(raw_json)
+    allowed = TelemetrySample.__dataclass_fields__
+    return TelemetrySample(**{key: value for key, value in data.items() if key in allowed})
 
 
 def telemetry_point_to_dict(point: TelemetryPoint) -> dict:

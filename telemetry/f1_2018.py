@@ -13,15 +13,31 @@ F1_2018_PACKET_FORMAT = 2018
 F1_2018_HEADER_FORMAT = "<HBBQfIB"
 F1_2018_HEADER_SIZE = struct.calcsize(F1_2018_HEADER_FORMAT)
 F1_2018_NUMBER_OF_CARS = 20
+F1_2018_MOTION_PACKET_ID = 0
+F1_2018_LAP_DATA_PACKET_ID = 2
 F1_2018_CAR_TELEMETRY_PACKET_ID = 6
+F1_2018_MOTION_PACKET_SIZE = 1341
+F1_2018_LAP_DATA_PACKET_SIZE = 841
 F1_2018_CAR_TELEMETRY_PACKET_SIZE = 1085
+F1_2018_MOTION_RECORD_SIZE = 60
+F1_2018_LAP_DATA_RECORD_SIZE = 41
 F1_2018_CAR_TELEMETRY_RECORD_SIZE = 53
 
 CAR_SPEED_OFFSET = 0
 CAR_THROTTLE_OFFSET = 2
+CAR_STEERING_OFFSET = 3
 CAR_BRAKE_OFFSET = 4
+CAR_CLUTCH_OFFSET = 5
 CAR_GEAR_OFFSET = 6
 CAR_RPM_OFFSET = 7
+
+LAP_LAST_LAP_TIME_OFFSET = 0
+LAP_CURRENT_LAP_TIME_OFFSET = 4
+LAP_BEST_LAP_TIME_OFFSET = 8
+LAP_DISTANCE_OFFSET = 20
+LAP_CURRENT_LAP_NUMBER_OFFSET = 33
+LAP_CURRENT_SECTOR_OFFSET = 35
+LAP_INVALID_OFFSET = 36
 
 PACKET_NAMES = {
     0: "Motion",
@@ -52,6 +68,26 @@ class F1CarTelemetry:
     gear: int
     throttle_percent: int
     brake_percent: int
+    clutch_percent: int
+    steering: int
+
+
+@dataclass(slots=True)
+class F1LapData:
+    last_lap_time_ms: int | None
+    current_lap_time_ms: int | None
+    best_lap_time_ms: int | None
+    lap_distance: float | None
+    lap_number: int
+    current_sector_index: int | None
+    invalid_lap: bool
+
+
+@dataclass(slots=True)
+class F1MotionData:
+    world_position_x: float
+    world_position_y: float
+    world_position_z: float
 
 
 class F12018TelemetrySource(TelemetrySource):
@@ -68,6 +104,8 @@ class F12018TelemetrySource(TelemetrySource):
         self._valid_telemetry_packets = 0
         self._parser_errors = 0
         self._last_packet_time = 0.0
+        self._latest_lap_data: F1LapData | None = None
+        self._latest_motion_data: F1MotionData | None = None
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setInterval(1000)
         self._timeout_timer.timeout.connect(self._check_timeout)
@@ -137,6 +175,16 @@ class F12018TelemetrySource(TelemetrySource):
             self._emit_diagnostics({"parser_status": f"Unsupported packet format: {header.packet_format}"})
             return
 
+        if header.packet_id == F1_2018_LAP_DATA_PACKET_ID:
+            self._latest_lap_data = parse_lap_data_packet(packet, header.player_car_index)
+            self._emit_diagnostics({"parser_status": "F1 2018 lap data decoded"})
+            return
+
+        if header.packet_id == F1_2018_MOTION_PACKET_ID:
+            self._latest_motion_data = parse_motion_packet(packet, header.player_car_index)
+            self._emit_diagnostics({"parser_status": "F1 2018 motion data decoded"})
+            return
+
         if header.packet_id != F1_2018_CAR_TELEMETRY_PACKET_ID:
             self._emit_diagnostics({"parser_status": "F1 2018 detected"})
             return
@@ -162,9 +210,25 @@ class F12018TelemetrySource(TelemetrySource):
                 gear=telemetry.gear,
                 throttle_percent=float(telemetry.throttle_percent),
                 brake_percent=float(telemetry.brake_percent),
+                clutch_percent=float(telemetry.clutch_percent),
+                steering=float(telemetry.steering),
                 source_name=self.display_name,
                 session_state="UDP telemetry",
                 timestamp=time.time(),
+                session_time=header.session_time,
+                lap_number=self._latest_lap_data.lap_number if self._latest_lap_data else None,
+                lap_time=self._latest_lap_data.current_lap_time_ms / 1000.0 if self._latest_lap_data and self._latest_lap_data.current_lap_time_ms is not None else None,
+                current_lap_time_ms=self._latest_lap_data.current_lap_time_ms if self._latest_lap_data else None,
+                last_lap_time_ms=self._latest_lap_data.last_lap_time_ms if self._latest_lap_data else None,
+                best_lap_time_ms=self._latest_lap_data.best_lap_time_ms if self._latest_lap_data else None,
+                completed_laps=max(0, self._latest_lap_data.lap_number - 1) if self._latest_lap_data else None,
+                current_sector_index=self._latest_lap_data.current_sector_index if self._latest_lap_data else None,
+                lap_distance=self._latest_lap_data.lap_distance if self._latest_lap_data else None,
+                invalid_lap=self._latest_lap_data.invalid_lap if self._latest_lap_data else None,
+                lap_valid=not self._latest_lap_data.invalid_lap if self._latest_lap_data else None,
+                world_position_x=self._latest_motion_data.world_position_x if self._latest_motion_data else None,
+                world_position_y=self._latest_motion_data.world_position_y if self._latest_motion_data else None,
+                world_position_z=self._latest_motion_data.world_position_z if self._latest_motion_data else None,
             )
         )
 
@@ -261,13 +325,15 @@ def parse_car_telemetry_packet(packet: bytes, player_car_index: int) -> F1CarTel
     try:
         speed = struct.unpack_from("<H", packet, player_data_start + CAR_SPEED_OFFSET)[0]
         throttle = struct.unpack_from("<B", packet, player_data_start + CAR_THROTTLE_OFFSET)[0]
+        steering = struct.unpack_from("<b", packet, player_data_start + CAR_STEERING_OFFSET)[0]
         brake = struct.unpack_from("<B", packet, player_data_start + CAR_BRAKE_OFFSET)[0]
+        clutch = struct.unpack_from("<B", packet, player_data_start + CAR_CLUTCH_OFFSET)[0]
         gear = struct.unpack_from("<b", packet, player_data_start + CAR_GEAR_OFFSET)[0]
         rpm = struct.unpack_from("<H", packet, player_data_start + CAR_RPM_OFFSET)[0]
     except struct.error:
         return None
 
-    if speed > 500 or rpm > 25000 or throttle > 100 or brake > 100:
+    if speed > 500 or rpm > 25000 or throttle > 100 or brake > 100 or clutch > 100:
         return None
 
     return F1CarTelemetry(
@@ -276,7 +342,53 @@ def parse_car_telemetry_packet(packet: bytes, player_car_index: int) -> F1CarTel
         gear=gear,
         throttle_percent=throttle,
         brake_percent=brake,
+        clutch_percent=clutch,
+        steering=steering,
     )
+
+
+def parse_lap_data_packet(packet: bytes, player_car_index: int) -> F1LapData | None:
+    if len(packet) != F1_2018_LAP_DATA_PACKET_SIZE:
+        return None
+    if player_car_index < 0 or player_car_index >= F1_2018_NUMBER_OF_CARS:
+        return None
+    player_data_start = F1_2018_HEADER_SIZE + player_car_index * F1_2018_LAP_DATA_RECORD_SIZE
+    try:
+        last_lap_time = struct.unpack_from("<f", packet, player_data_start + LAP_LAST_LAP_TIME_OFFSET)[0]
+        current_lap_time = struct.unpack_from("<f", packet, player_data_start + LAP_CURRENT_LAP_TIME_OFFSET)[0]
+        best_lap_time = struct.unpack_from("<f", packet, player_data_start + LAP_BEST_LAP_TIME_OFFSET)[0]
+        lap_distance = struct.unpack_from("<f", packet, player_data_start + LAP_DISTANCE_OFFSET)[0]
+        lap_number = struct.unpack_from("<B", packet, player_data_start + LAP_CURRENT_LAP_NUMBER_OFFSET)[0]
+        sector = struct.unpack_from("<B", packet, player_data_start + LAP_CURRENT_SECTOR_OFFSET)[0]
+        invalid_lap = struct.unpack_from("<B", packet, player_data_start + LAP_INVALID_OFFSET)[0]
+    except struct.error:
+        return None
+    return F1LapData(
+        last_lap_time_ms=seconds_to_ms(last_lap_time),
+        current_lap_time_ms=seconds_to_ms(current_lap_time),
+        best_lap_time_ms=seconds_to_ms(best_lap_time),
+        lap_distance=max(0.0, float(lap_distance)) if lap_distance >= 0.0 else None,
+        lap_number=int(lap_number),
+        current_sector_index=int(sector) if 0 <= int(sector) <= 2 else None,
+        invalid_lap=bool(invalid_lap),
+    )
+
+
+def parse_motion_packet(packet: bytes, player_car_index: int) -> F1MotionData | None:
+    if len(packet) != F1_2018_MOTION_PACKET_SIZE:
+        return None
+    if player_car_index < 0 or player_car_index >= F1_2018_NUMBER_OF_CARS:
+        return None
+    player_data_start = F1_2018_HEADER_SIZE + player_car_index * F1_2018_MOTION_RECORD_SIZE
+    try:
+        x, y, z = struct.unpack_from("<fff", packet, player_data_start)
+    except struct.error:
+        return None
+    return F1MotionData(float(x), float(y), float(z))
+
+
+def seconds_to_ms(value: float) -> int | None:
+    return int(round(value * 1000.0)) if value > 0.0 else None
 
 
 def get_packet_name(packet_id: int) -> str:

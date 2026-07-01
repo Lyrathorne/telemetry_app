@@ -65,6 +65,25 @@ PANEL_TEMPLATES: dict[str, PanelTemplate] = {
             "settings_hidden": True,
         },
     ),
+    "steering_graph": PanelTemplate(
+        "steering_graph",
+        "Steering graph",
+        "graph",
+        "Live steering trace by lap distance when available.",
+        default_config={
+            "metrics": ["steering"],
+            "x_mode": "follow_live",
+            "recent_window": 200,
+            "y_mode": "metric_default",
+            "settings_hidden": True,
+        },
+    ),
+    "track_map": PanelTemplate(
+        "track_map",
+        "Track map",
+        "track_map",
+        "Live car trajectory from game-provided world coordinates.",
+    ),
     "speed_rpm_graph": PanelTemplate(
         "speed_rpm_graph",
         "Speed and RPM graph",
@@ -148,16 +167,16 @@ PANEL_TEMPLATES: dict[str, PanelTemplate] = {
 
 
 TEMPLATE_GROUPS: dict[str, list[str]] = {
-    "Live driving": ["pedals_graph", "speed_rpm_graph", "current_lap_graph", "live_values"],
+    "Live driving": ["pedals_graph", "speed_rpm_graph", "steering_graph", "current_lap_graph", "track_map", "live_values"],
     "Timing": ["live_lap_timing", "sector_timing", "lap_history", "session_history", "best_laps"],
-    "Analysis": ["lap_comparison", "time_delta_graph"],
+    "Analysis": ["lap_comparison", "time_delta_graph", "track_map"],
     "Diagnostics": ["source_status", "connection_diagnostics"],
 }
 
 
 BUILTIN_LAYOUTS: dict[str, list[str]] = {
-    "Live driving": ["pedals_graph", "speed_rpm_graph", "current_lap_graph", "live_values", "sector_timing"],
+    "Live driving": ["pedals_graph", "speed_rpm_graph", "steering_graph", "current_lap_graph", "track_map", "live_values", "sector_timing"],
     "Timing": ["live_lap_timing", "sector_timing", "lap_history", "session_history", "live_values"],
-    "Analysis": ["lap_history", "lap_comparison", "time_delta_graph"],
+    "Analysis": ["lap_history", "lap_comparison", "time_delta_graph", "track_map"],
     "Diagnostics": ["source_status", "connection_diagnostics"],
 }

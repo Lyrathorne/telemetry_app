@@ -35,6 +35,9 @@ class TelemetrySample:
     in_pit_lane: bool | None = None
     clutch_percent: float | None = None
     steering: float | None = None
+    world_position_x: float | None = None
+    world_position_y: float | None = None
+    world_position_z: float | None = None
 
     @property
     def speed_kph(self) -> float:
@@ -109,6 +112,9 @@ class LapTelemetrySeries:
     brake_percent: list[float | None] = field(default_factory=list)
     clutch_percent: list[float | None] = field(default_factory=list)
     steering: list[float | None] = field(default_factory=list)
+    world_position_x: list[float | None] = field(default_factory=list)
+    world_position_y: list[float | None] = field(default_factory=list)
+    world_position_z: list[float | None] = field(default_factory=list)
     sector_boundary_elapsed_s: list[float] = field(default_factory=list)
 
     @property
@@ -171,6 +177,9 @@ class TelemetryPoint:
     steering: float | None = None
     gear: int | None = None
     rpm: int | None = None
+    world_position_x: float | None = None
+    world_position_y: float | None = None
+    world_position_z: float | None = None
 
 
 @dataclass(slots=True)

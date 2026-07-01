@@ -21,6 +21,9 @@ CANONICAL_COLUMNS = {
     "brake_percent",
     "clutch_percent",
     "steering",
+    "world_position_x",
+    "world_position_y",
+    "world_position_z",
 }
 
 COLUMN_ALIASES = {
@@ -44,6 +47,15 @@ COLUMN_ALIASES = {
     "steering": "steering",
     "steer": "steering",
     "clutch": "clutch_percent",
+    "world_x": "world_position_x",
+    "world_y": "world_position_y",
+    "world_z": "world_position_z",
+    "position_x": "world_position_x",
+    "position_y": "world_position_y",
+    "position_z": "world_position_z",
+    "car_x": "world_position_x",
+    "car_y": "world_position_y",
+    "car_z": "world_position_z",
 }
 
 METRIC_COLUMNS = {
@@ -55,6 +67,9 @@ METRIC_COLUMNS = {
     "brake_percent",
     "clutch_percent",
     "steering",
+    "world_position_x",
+    "world_position_y",
+    "world_position_z",
 }
 
 X_AXIS_COLUMNS = {"timestamp", "session_time", "lap_time", "lap_distance"}
@@ -210,6 +225,9 @@ def sample_from_csv_row(row: dict[str, str], mapping: dict[str, str]) -> Telemet
         brake_percent=float(values.get("brake_percent") or 0.0),
         clutch_percent=optional_float(values.get("clutch_percent")),
         steering=optional_float(values.get("steering")),
+        world_position_x=optional_float(values.get("world_position_x")),
+        world_position_y=optional_float(values.get("world_position_y")),
+        world_position_z=optional_float(values.get("world_position_z")),
     )
 
 
@@ -227,6 +245,9 @@ def _sample_from_mapping(row: dict) -> TelemetrySample:
         brake_percent=normalize_control(float(row.get("brake_percent") or row.get("brake") or 0.0)),
         clutch_percent=optional_float(row.get("clutch_percent") or row.get("clutch")),
         steering=optional_float(row.get("steering")),
+        world_position_x=optional_float(row.get("world_position_x") or row.get("world_x") or row.get("position_x")),
+        world_position_y=optional_float(row.get("world_position_y") or row.get("world_y") or row.get("position_y")),
+        world_position_z=optional_float(row.get("world_position_z") or row.get("world_z") or row.get("position_z")),
     )
 
 
@@ -276,7 +297,12 @@ def session_to_dict(session: TelemetrySession) -> dict:
 
 
 def session_from_dict(data: dict) -> TelemetrySession:
-    samples = [TelemetrySample(**sample) for sample in data.get("samples", [])]
+    allowed = TelemetrySample.__dataclass_fields__
+    samples = [
+        TelemetrySample(**{key: value for key, value in sample.items() if key in allowed})
+        for sample in data.get("samples", [])
+        if isinstance(sample, dict)
+    ]
     return TelemetrySession(
         id=str(data.get("id") or ""),
         source_type=str(data.get("source_type") or "imported"),

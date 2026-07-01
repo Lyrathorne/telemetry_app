@@ -55,6 +55,7 @@ from telemetry.lap_tracker import LapTracker
 from telemetry.sector_feedback import sector_feedback
 from telemetry.session_store import SessionStore
 from ui.graph_panel import GraphPanel, PENS
+from ui.track_map_panel import TrackMapPanel
 from ui.docking import DetachedPanelWindow, install_dock_context_menu
 from ui.dashboard_workspace import DashboardWorkspace
 from ui.panel_registry import PanelRegistry
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
         self.graph_panels: list[GraphPanel] = []
         self.current_lap_graph_panels: list[GraphPanel] = []
         self.saved_lap_graph_panels: list[GraphPanel] = []
+        self.track_map_panels: list[TrackMapPanel] = []
         self.live_value_panels: list[dict[str, QLabel]] = []
         self.live_lap_tables: list[QTableWidget] = []
         self.sector_timing_tables: list[QTableWidget] = []
@@ -532,6 +534,7 @@ class MainWindow(QMainWindow):
             "acc_last_sector_time_ms": "ACC last sector:",
             "acc_completed_laps": "ACC completed laps:",
             "acc_normalized_position": "ACC normalized position:",
+            "acc_car_coordinates": "ACC car coordinates:",
             "acc_in_pit": "ACC pit:",
             "timing_state": "Timing state:",
             "timing_waiting_reason": "Timing reason:",
@@ -623,6 +626,7 @@ class MainWindow(QMainWindow):
         for text, handler in (
             ("Compare selected laps", self.compare_selected_laps),
             ("Open lap graph", self.open_selected_lap_graph),
+            ("Open track map", self.open_selected_lap_map),
             ("Delete selected lap", self.delete_selected_lap),
             ("Export selected lap", self.export_selected_lap),
         ):
@@ -813,6 +817,8 @@ class MainWindow(QMainWindow):
             return self._create_lap_comparison_template_widget()
         if template.panel_type == "time_delta_graph":
             return self._create_time_delta_template_widget()
+        if template.panel_type == "track_map":
+            return self._create_track_map_widget()
         self._logger.warning("Unsupported panel type ignored: %s", template.panel_type)
         return None
 
@@ -860,6 +866,16 @@ class MainWindow(QMainWindow):
             labels[key] = value
         self.live_value_panels.append(labels)
         return widget
+
+    def _create_track_map_widget(self) -> TrackMapPanel:
+        panel = TrackMapPanel("Track map", self)
+        panel.setMinimumSize(160, 120)
+        if self.lap_tracker.active_lap is not None:
+            panel.replace_samples(self.lap_tracker.active_lap.samples)
+        elif self.recording_samples:
+            panel.replace_samples(self.recording_samples)
+        self.track_map_panels.append(panel)
+        return panel
 
     def _create_live_lap_timing_widget(self) -> QWidget:
         table = QTableWidget(1, 7, self)
@@ -1029,6 +1045,9 @@ class MainWindow(QMainWindow):
         self._update_active_reference(sample)
         for panel in self.graph_panels:
             panel.add_sample(sample)
+        for panel in self.track_map_panels:
+            if panel.live_updates:
+                panel.add_sample(sample)
         self._update_live_lap_template_panels(sample)
         self._update_sector_template_panels(sample)
         self.lap_tracker.process_sample(sample)
@@ -1522,6 +1541,27 @@ class MainWindow(QMainWindow):
         self.saved_lap_graph_panels.append(panel)
         panel_id = self._next_panel_id("saved_lap_graph")
         template = PanelTemplate(panel_id, title, "saved_lap_graph", "Frozen completed lap graph.")
+        self._register_workspace_panel(panel_id, template, panel)
+        return panel
+
+    def open_selected_lap_map(self) -> None:
+        laps = self.selected_laps()
+        if not laps:
+            self._show_error("Lap map unavailable", "Select a lap in Lap history first.")
+            return
+        panel = self.open_lap_map(laps[0])
+        if panel is None:
+            self._show_error("Lap map unavailable", "This lap does not contain saved car position coordinates.")
+
+    def open_lap_map(self, lap: LapResult) -> TrackMapPanel | None:
+        if not any(sample.world_position_x is not None and sample.world_position_z is not None for sample in lap.samples):
+            return None
+        title = f"Lap {lap.lap_number} track map"
+        panel = TrackMapPanel(title, self, live_updates=False)
+        panel.replace_samples(lap.samples)
+        self.track_map_panels.append(panel)
+        panel_id = self._next_panel_id("saved_lap_map")
+        template = PanelTemplate(panel_id, title, "track_map", "Frozen completed lap trajectory.")
         self._register_workspace_panel(panel_id, template, panel)
         return panel
 
@@ -2075,6 +2115,8 @@ class MainWindow(QMainWindow):
                 self.current_lap_graph_panels.remove(widget)
             if isinstance(widget, GraphPanel) and widget in self.saved_lap_graph_panels:
                 self.saved_lap_graph_panels.remove(widget)
+            if isinstance(widget, TrackMapPanel) and widget in self.track_map_panels:
+                self.track_map_panels.remove(widget)
             widget.deleteLater()
         self.panel_registry.remove(panel_id)
         self.panel_widgets.pop(panel_id, None)

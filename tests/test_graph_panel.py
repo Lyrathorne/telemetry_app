@@ -12,6 +12,7 @@ from ui.graph_panel import (
     combined_metric_default_range,
     downsample_xy,
 )
+from ui.track_map_panel import trajectory_points
 
 
 def app() -> QApplication:
@@ -71,6 +72,14 @@ class GraphPanelTests(unittest.TestCase):
         panel.add_sample(TelemetrySample(timestamp=1001.0, speed_kmh=20.0))
         self.assertEqual(panel._sample_x(panel.samples[0]), 0.0)
         self.assertEqual(panel._sample_x(panel.samples[1]), 1.0)
+
+    def test_x_axis_prefers_lap_distance_when_available(self) -> None:
+        panel = GraphPanel("Test", 50, 100)
+        panel.add_sample(TelemetrySample(timestamp=1000.0, lap_distance=12.5, speed_kmh=10.0))
+        panel.add_sample(TelemetrySample(timestamp=1001.0, lap_distance=27.0, speed_kmh=20.0))
+        self.assertEqual(panel._sample_x(panel.samples[0]), 12.5)
+        self.assertEqual(panel._sample_x(panel.samples[1]), 27.0)
+        self.assertTrue(panel._uses_distance_axis())
 
     def test_full_session_history_does_not_discard_old_samples(self) -> None:
         panel = GraphPanel("Test", 50, 100)
@@ -172,6 +181,16 @@ class GraphPanelTests(unittest.TestCase):
         self.assertEqual(restored.selected_metrics(), ["throttle_percent", "brake_percent"])
         self.assertEqual(restored.x_mode_combo.currentData(), "recent_window")
         self.assertEqual(restored.recent_window_seconds.value(), 60)
+
+    def test_trajectory_points_use_real_world_coordinates_only(self) -> None:
+        points = trajectory_points(
+            [
+                TelemetrySample(world_position_x=1.0, world_position_z=2.0),
+                TelemetrySample(speed_kmh=100.0),
+                TelemetrySample(world_position_x=3.0, world_position_z=4.0),
+            ]
+        )
+        self.assertEqual(points.tolist(), [[1.0, 2.0], [3.0, 4.0]])
 
 
 if __name__ == "__main__":

@@ -28,9 +28,6 @@ from telemetry.timing_status import (
 MIN_REASONABLE_LAP_MS = 10_000
 MIN_REASONABLE_SECTOR_MS = 1_000
 SECTOR_SUM_TOLERANCE_MS = 250
-MAX_SAVED_LAP_SAMPLES = 1000
-
-
 class TimingState(str, Enum):
     DISCONNECTED = "DISCONNECTED"
     WAITING_FOR_GAME = "WAITING_FOR_GAME"
@@ -152,6 +149,9 @@ class LapGraphBuffer:
             brake_percent=[sample.brake_percent for sample in self._samples],
             clutch_percent=[sample.clutch_percent for sample in self._samples],
             steering=[sample.steering for sample in self._samples],
+            world_position_x=[sample.world_position_x for sample in self._samples],
+            world_position_y=[sample.world_position_y for sample in self._samples],
+            world_position_z=[sample.world_position_z for sample in self._samples],
             sector_boundary_elapsed_s=[boundary / 1000.0 for boundary in sector_boundary_times_ms],
         )
 
@@ -417,7 +417,6 @@ class LapTracker(QObject):
         self._ensure_complete_sector_set(lap)
         self._validate_completed_sector_timing(lap)
         self._freeze_lap_graph(lap)
-        lap.samples = downsample_samples(lap.samples, MAX_SAVED_LAP_SAMPLES)
         lap.raw_samples_recorded = True
         completed_snapshot = deepcopy(lap)
         self.repository.add_completed_lap(completed_snapshot)
@@ -870,16 +869,6 @@ def personal_best_time(laps: list[LapResult], lap: LapResult) -> int:
 def sector_time(lap: LapResult, sector_number: int) -> int | None:
     sector = next((item for item in lap.sectors if item.sector_number == sector_number), None)
     return sector.time_ms if sector is not None else None
-
-
-def downsample_samples(samples: list[TelemetrySample], max_samples: int) -> list[TelemetrySample]:
-    if len(samples) <= max_samples:
-        return list(samples)
-    if max_samples <= 1:
-        return samples[:1]
-    step = (len(samples) - 1) / (max_samples - 1)
-    indexes = sorted({round(index * step) for index in range(max_samples)})
-    return [samples[index] for index in indexes]
 
 
 def append_note(existing: str, note: str) -> str:

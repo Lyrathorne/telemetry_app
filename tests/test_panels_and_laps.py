@@ -476,6 +476,35 @@ class PanelAndLapTests(unittest.TestCase):
             self.assertTrue(loaded[0].raw_samples_recorded)
             self.assertGreaterEqual(len(loaded[0].samples), 3)
 
+    def test_saved_lap_preserves_world_position_and_steering_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
+            tracker = LapTracker(storage)
+            tracker.start_session("ACC", "Track", "Car")
+            start = lap_sample(0.0, 0, 0.0, 0, 0)
+            start.world_position_x = 1.0
+            start.world_position_y = 0.5
+            start.world_position_z = -2.0
+            start.steering = -0.1
+            tracker.process_sample(start)
+            tracker.process_sample(lap_sample(30.0, 30000, 0.3, 0, 1, split_ms=30000))
+            tracker.process_sample(lap_sample(70.0, 70000, 0.7, 0, 2, split_ms=70000))
+            finish = lap_sample(100.0, 100, 0.01, 1, 0)
+            finish.last_lap_time_ms = 100000
+            finish.world_position_x = 3.0
+            finish.world_position_y = 0.5
+            finish.world_position_z = 4.0
+            finish.steering = 0.2
+
+            tracker.process_sample(finish)
+            loaded = storage.load_laps()
+
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].samples[0].world_position_x, 1.0)
+            self.assertEqual(loaded[0].samples[0].world_position_z, -2.0)
+            self.assertEqual(loaded[0].samples[-1].world_position_x, 3.0)
+            self.assertEqual(loaded[0].samples[-1].steering, 0.2)
+
     def test_saved_lap_telemetry_is_not_overwritten_by_next_lap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = LapStorage(Path(tmpdir) / "laps.sqlite3")
@@ -495,7 +524,6 @@ class PanelAndLapTests(unittest.TestCase):
 
             self.assertEqual(len(loaded), 1)
             self.assertEqual(len(loaded[0].samples), first_sample_count)
-            self.assertLessEqual(len(loaded[0].samples), 1000)
 
     def test_pit_sample_does_not_create_completed_lap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

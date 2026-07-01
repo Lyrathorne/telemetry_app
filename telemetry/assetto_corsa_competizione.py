@@ -35,6 +35,7 @@ STATIC_MAP_SIZE = 784
 
 PHYSICS_FORMAT = "=ifffii"
 PHYSICS_HEADER_SIZE = struct.calcsize(PHYSICS_FORMAT)
+STEER_ANGLE_OFFSET = PHYSICS_HEADER_SIZE
 SPEED_KMH_OFFSET = PHYSICS_HEADER_SIZE + 4
 
 GRAPHICS_HEADER_FORMAT = "=iii"
@@ -56,6 +57,7 @@ GRAPHICS_NUMBER_OF_LAPS_OFFSET = 172
 GRAPHICS_TYRE_COMPOUND_OFFSET = 176
 GRAPHICS_REPLAY_TIME_MULTIPLIER_OFFSET = 244
 GRAPHICS_NORMALIZED_POSITION_OFFSET = 248
+GRAPHICS_CAR_COORDINATES_OFFSET = 252
 
 
 class AccTelemetrySource(TelemetrySource):
@@ -157,6 +159,7 @@ class AccTelemetrySource(TelemetrySource):
                 "acc_last_sector_time_ms": graphics.get("last_sector_time_ms"),
                 "acc_completed_laps": graphics.get("completed_laps"),
                 "acc_normalized_position": graphics.get("normalized_track_position"),
+                "acc_car_coordinates": graphics.get("car_coordinates"),
                 "acc_in_pit": graphics.get("is_in_pit"),
             }
         )
@@ -182,6 +185,7 @@ class AccTelemetrySource(TelemetrySource):
                 gear=normalize_acc_gear(physics["gear"]),
                 throttle_percent=to_percent(physics["gas"]),
                 brake_percent=to_percent(physics["brake"]),
+                steering=physics.get("steering"),
                 source_name=self.display_name,
                 car_name=statics["car_name"],
                 track_name=statics["track_name"],
@@ -196,6 +200,9 @@ class AccTelemetrySource(TelemetrySource):
                 last_sector_time_ms=graphics.get("last_sector_time_ms"),
                 lap_distance=graphics.get("distance_traveled_m"),
                 normalized_track_position=graphics.get("normalized_track_position"),
+                world_position_x=component_or_none(graphics.get("car_coordinates"), 0),
+                world_position_y=component_or_none(graphics.get("car_coordinates"), 1),
+                world_position_z=component_or_none(graphics.get("car_coordinates"), 2),
                 in_pit=graphics.get("is_in_pit"),
                 invalid_lap=False,
                 lap_valid=True,
@@ -257,6 +264,7 @@ def read_acc_physics(mapping: NamedSharedMemory) -> dict:
         PHYSICS_FORMAT, mapping.read_bytes(0, PHYSICS_HEADER_SIZE)
     )
     speed_kmh = struct.unpack("=f", mapping.read_bytes(SPEED_KMH_OFFSET, 4))[0]
+    steering = struct.unpack("=f", mapping.read_bytes(STEER_ANGLE_OFFSET, 4))[0]
 
     return {
         "packet_id": int(packet_id),
@@ -265,6 +273,7 @@ def read_acc_physics(mapping: NamedSharedMemory) -> dict:
         "gear": int(gear),
         "rpm": int(rpm),
         "speed_kmh": float(speed_kmh),
+        "steering": float(steering),
     }
 
 
@@ -286,6 +295,7 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
     current_sector_index = read_int32(mapping, GRAPHICS_CURRENT_SECTOR_OFFSET)
     last_sector_time_ms = read_int32(mapping, GRAPHICS_LAST_SECTOR_TIME_OFFSET)
     normalized_position = read_float32(mapping, GRAPHICS_NORMALIZED_POSITION_OFFSET)
+    car_coordinates = read_vector3(mapping, GRAPHICS_CAR_COORDINATES_OFFSET)
     return {
         "packet_id": int(packet_id),
         "status": int(status),
@@ -301,6 +311,7 @@ def read_acc_graphics(mapping: NamedSharedMemory) -> dict:
         "last_sector_time_ms": positive_time_or_none(last_sector_time_ms),
         "distance_traveled_m": max(0.0, float(distance_traveled_m)),
         "normalized_track_position": normalized_position if 0.0 <= normalized_position <= 1.0 else None,
+        "car_coordinates": car_coordinates,
         "is_in_pit": is_in_pit,
         "current_sector_index": current_sector_index if 0 <= current_sector_index <= 2 else None,
     }
@@ -336,6 +347,16 @@ def read_int32(mapping: NamedSharedMemory, offset: int) -> int:
 
 def read_float32(mapping: NamedSharedMemory, offset: int) -> float:
     return float(struct.unpack("=f", mapping.read_bytes(offset, 4))[0])
+
+
+def read_vector3(mapping: NamedSharedMemory, offset: int) -> tuple[float, float, float]:
+    return tuple(float(value) for value in struct.unpack("=fff", mapping.read_bytes(offset, 12)))
+
+
+def component_or_none(vector: tuple[float, float, float] | None, index: int) -> float | None:
+    if vector is None:
+        return None
+    return float(vector[index])
 
 
 def positive_time_or_none(value: int | None) -> int | None:

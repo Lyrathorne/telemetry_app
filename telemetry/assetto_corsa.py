@@ -298,11 +298,27 @@ class AssettoCorsaTelemetrySource(TelemetrySource):
                 gear=normalize_ac_gear(int(self._physics.gear)),
                 throttle_percent=to_percent(float(self._physics.gas)),
                 brake_percent=to_percent(float(self._physics.brake)),
+                clutch_percent=to_percent(float(self._physics.clutch)),
+                steering=float(self._physics.steerAngle),
                 source_name=self.display_name,
                 car_name=car_name,
                 track_name=track_name,
                 session_state=AC_STATUS_NAMES.get(status, ""),
                 timestamp=time.time(),
+                current_lap_time_ms=positive_time_or_none(int(self._graphics.iCurrentTime)),
+                last_lap_time_ms=positive_time_or_none(int(self._graphics.iLastTime)),
+                best_lap_time_ms=positive_time_or_none(int(self._graphics.iBestTime)),
+                completed_laps=max(0, int(self._graphics.completedLaps)),
+                current_sector_index=current_sector_or_none(int(self._graphics.currentSectorIndex)),
+                current_split_time_ms=parse_split_time(clean_wide_string(self._graphics.split)),
+                last_sector_time_ms=positive_time_or_none(int(self._graphics.lastSectorTime)),
+                lap_distance=max(0.0, float(self._graphics.distanceTraveled)),
+                normalized_track_position=normalized_or_none(float(self._graphics.normalizedCarPosition)),
+                world_position_x=float(self._graphics.carCoordinates[0]),
+                world_position_y=float(self._graphics.carCoordinates[1]),
+                world_position_z=float(self._graphics.carCoordinates[2]),
+                in_pit=bool(self._graphics.isInPit),
+                in_pit_lane=bool(self._graphics.isInPitLine),
             )
         )
 
@@ -346,6 +362,36 @@ def to_percent(value: float) -> float:
 
 def clean_wide_string(value: str) -> str:
     return value.split("\x00", 1)[0].strip()
+
+
+def positive_time_or_none(value: int) -> int | None:
+    return int(value) if int(value) > 0 else None
+
+
+def current_sector_or_none(value: int) -> int | None:
+    return int(value) if 0 <= int(value) <= 2 else None
+
+
+def normalized_or_none(value: float) -> float | None:
+    return float(value) if 0.0 <= float(value) <= 1.0 else None
+
+
+def parse_split_time(value: str) -> int | None:
+    text = value.strip()
+    if not text or text == "--":
+        return None
+    parts = text.replace(":", ".").split(".")
+    try:
+        numbers = [int(part) for part in parts if part != ""]
+    except ValueError:
+        return None
+    if len(numbers) == 2:
+        seconds, millis = numbers
+        return seconds * 1000 + millis
+    if len(numbers) == 3:
+        minutes, seconds, millis = numbers
+        return (minutes * 60 + seconds) * 1000 + millis
+    return None
 
 
 def readable_error(error: BaseException) -> str:

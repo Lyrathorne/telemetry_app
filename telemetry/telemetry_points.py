@@ -18,6 +18,9 @@ def sample_to_point(sample: TelemetrySample, first_timestamp: float | None = Non
         steering=sample.steering,
         gear=sample.gear,
         rpm=sample.rpm,
+        world_position_x=sample.world_position_x,
+        world_position_y=sample.world_position_y,
+        world_position_z=sample.world_position_z,
     )
 
 

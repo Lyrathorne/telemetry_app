@@ -14,6 +14,7 @@ from telemetry.assetto_corsa_competizione import (
     GRAPHICS_LAST_SECTOR_TIME_OFFSET,
     GRAPHICS_LAST_TIME_TEXT_OFFSET,
     GRAPHICS_LAST_TIME_OFFSET,
+    GRAPHICS_CAR_COORDINATES_OFFSET,
     GRAPHICS_NORMALIZED_POSITION_OFFSET,
     GRAPHICS_SPLIT_TEXT_OFFSET,
     GRAPHICS_HEADER_FORMAT,
@@ -27,10 +28,17 @@ from telemetry.assetto_corsa_competizione import (
 from telemetry.f1_2018 import (
     F1_2018_CAR_TELEMETRY_PACKET_ID,
     F1_2018_CAR_TELEMETRY_PACKET_SIZE,
+    F1_2018_LAP_DATA_PACKET_ID,
+    F1_2018_LAP_DATA_PACKET_SIZE,
+    F1_2018_MOTION_PACKET_ID,
+    F1_2018_MOTION_PACKET_SIZE,
     F1_2018_HEADER_FORMAT,
     F1_2018_HEADER_SIZE,
     F1_2018_PACKET_FORMAT,
+    F1_2018_MOTION_RECORD_SIZE,
     parse_car_telemetry_packet,
+    parse_lap_data_packet,
+    parse_motion_packet,
     parse_packet_header,
 )
 
@@ -78,7 +86,9 @@ class TelemetryTests(unittest.TestCase):
         record_start = F1_2018_HEADER_SIZE
         struct.pack_into("<H", packet, record_start, 286)
         struct.pack_into("<B", packet, record_start + 2, 87)
+        struct.pack_into("<b", packet, record_start + 3, -14)
         struct.pack_into("<B", packet, record_start + 4, 12)
+        struct.pack_into("<B", packet, record_start + 5, 7)
         struct.pack_into("<b", packet, record_start + 6, 6)
         struct.pack_into("<H", packet, record_start + 7, 11250)
 
@@ -88,8 +98,66 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.speed_kmh, 286)
         self.assertEqual(telemetry.throttle_percent, 87)
         self.assertEqual(telemetry.brake_percent, 12)
+        self.assertEqual(telemetry.clutch_percent, 7)
+        self.assertEqual(telemetry.steering, -14)
         self.assertEqual(telemetry.gear, 6)
         self.assertEqual(telemetry.rpm, 11250)
+
+    def test_f1_lap_data_parses_distance_and_lap_state(self) -> None:
+        packet = bytearray(F1_2018_LAP_DATA_PACKET_SIZE)
+        struct.pack_into(
+            F1_2018_HEADER_FORMAT,
+            packet,
+            0,
+            F1_2018_PACKET_FORMAT,
+            1,
+            F1_2018_LAP_DATA_PACKET_ID,
+            123,
+            10.0,
+            7,
+            0,
+        )
+        record_start = F1_2018_HEADER_SIZE
+        struct.pack_into("<f", packet, record_start + 0, 80.5)
+        struct.pack_into("<f", packet, record_start + 4, 12.25)
+        struct.pack_into("<f", packet, record_start + 8, 79.0)
+        struct.pack_into("<f", packet, record_start + 20, 456.75)
+        struct.pack_into("<B", packet, record_start + 33, 3)
+        struct.pack_into("<B", packet, record_start + 35, 1)
+        struct.pack_into("<B", packet, record_start + 36, 0)
+
+        lap_data = parse_lap_data_packet(bytes(packet), 0)
+
+        self.assertIsNotNone(lap_data)
+        self.assertEqual(lap_data.last_lap_time_ms, 80500)
+        self.assertEqual(lap_data.current_lap_time_ms, 12250)
+        self.assertEqual(lap_data.best_lap_time_ms, 79000)
+        self.assertAlmostEqual(lap_data.lap_distance, 456.75)
+        self.assertEqual(lap_data.lap_number, 3)
+        self.assertEqual(lap_data.current_sector_index, 1)
+        self.assertFalse(lap_data.invalid_lap)
+
+    def test_f1_motion_parses_world_position(self) -> None:
+        packet = bytearray(F1_2018_MOTION_PACKET_SIZE)
+        struct.pack_into(
+            F1_2018_HEADER_FORMAT,
+            packet,
+            0,
+            F1_2018_PACKET_FORMAT,
+            1,
+            F1_2018_MOTION_PACKET_ID,
+            123,
+            10.0,
+            7,
+            1,
+        )
+        record_start = F1_2018_HEADER_SIZE + F1_2018_MOTION_RECORD_SIZE
+        struct.pack_into("<fff", packet, record_start, 10.0, 2.0, -5.0)
+
+        motion = parse_motion_packet(bytes(packet), 1)
+
+        self.assertIsNotNone(motion)
+        self.assertEqual((motion.world_position_x, motion.world_position_y, motion.world_position_z), (10.0, 2.0, -5.0))
 
     def test_malformed_f1_packets_are_rejected(self) -> None:
         self.assertIsNone(parse_packet_header(b"\x00"))
@@ -111,7 +179,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(ac_to_percent(2.0), 100.0)
 
     def test_acc_graphics_reads_timing_fields(self) -> None:
-        packet = bytearray(256)
+        packet = bytearray(GRAPHICS_MAP_SIZE)
         struct.pack_into(GRAPHICS_HEADER_FORMAT, packet, 0, 9, 2, 0)
         write_utf16(packet, GRAPHICS_SPLIT_TEXT_OFFSET, "01:14.135", 15)
         write_utf16(packet, GRAPHICS_CURRENT_TIME_TEXT_OFFSET, "01:14.135", 15)
@@ -123,6 +191,7 @@ class TelemetryTests(unittest.TestCase):
         struct.pack_into("=i", packet, GRAPHICS_CURRENT_SECTOR_OFFSET, 2)
         struct.pack_into("=i", packet, GRAPHICS_LAST_SECTOR_TIME_OFFSET, 42851)
         struct.pack_into("=f", packet, GRAPHICS_NORMALIZED_POSITION_OFFSET, 0.75)
+        struct.pack_into("=fff", packet, GRAPHICS_CAR_COORDINATES_OFFSET, 10.0, 2.0, -5.0)
 
         graphics = read_acc_graphics(BytesMapping(packet))
 
@@ -134,6 +203,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(graphics["current_split_time_ms"], 74135)
         self.assertEqual(graphics["last_sector_time_ms"], 42851)
         self.assertEqual(graphics["normalized_track_position"], 0.75)
+        self.assertEqual(graphics["car_coordinates"], (10.0, 2.0, -5.0))
 
     def test_acc_shared_memory_pages_are_defined_independently(self) -> None:
         self.assertEqual(MAP_NAMES["physics"], "Local\\acpmf_physics")
@@ -144,7 +214,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertGreaterEqual(STATIC_MAP_SIZE, 784)
 
     def test_acc_negative_timing_sentinels_become_none(self) -> None:
-        packet = bytearray(256)
+        packet = bytearray(GRAPHICS_MAP_SIZE)
         struct.pack_into(GRAPHICS_HEADER_FORMAT, packet, 0, 10, 2, 0)
         struct.pack_into("=i", packet, GRAPHICS_CURRENT_TIME_OFFSET, -1)
         struct.pack_into("=i", packet, GRAPHICS_LAST_TIME_OFFSET, -1)

@@ -239,7 +239,7 @@ class GraphPanel(QWidget):
         self.reset_y_button.clicked.connect(self.reset_y_axis)
 
         axis_layout.addRow("X axis", self.x_mode_combo)
-        axis_layout.addRow("Recent window (s)", self.recent_window_seconds)
+        axis_layout.addRow("Recent X window", self.recent_window_seconds)
         axis_layout.addRow("Manual X min", self.x_min)
         axis_layout.addRow("Manual X max", self.x_max)
         axis_layout.addRow(self.reset_x_button)
@@ -266,7 +266,7 @@ class GraphPanel(QWidget):
             self.plot_widget = pg.PlotWidget()
             self.plot_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.plot_widget.setMinimumSize(280, 180)
-            self.plot_widget.setLabel("bottom", "Session time", units="s")
+            self.plot_widget.setLabel("bottom", "Lap distance", units="m")
             self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
             self.legend = self.plot_widget.addLegend(offset=(10, 10))
             layout.addWidget(self.plot_widget, stretch=1)
@@ -379,6 +379,7 @@ class GraphPanel(QWidget):
             return
 
         started = time.perf_counter()
+        self._apply_axis_labels()
         visible_x, visible_indices = self._visible_x_values()
         if visible_x.size == 0:
             self._apply_x_range()
@@ -535,7 +536,10 @@ class GraphPanel(QWidget):
         else:
             label = "Value"
         self.plot_widget.setLabel("left", label)
-        self.plot_widget.setLabel("bottom", "Session time", units="s")
+        if self._uses_distance_axis():
+            self.plot_widget.setLabel("bottom", "Lap distance", units="m")
+        else:
+            self.plot_widget.setLabel("bottom", "Session time", units="s")
 
     def _metric_check_changed(self, item: QListWidgetItem) -> None:
         metric = str(item.data(Qt.ItemDataRole.UserRole))
@@ -565,15 +569,22 @@ class GraphPanel(QWidget):
             self.legend.setVisible(visible)
 
     def _sample_absolute_x(self, sample: TelemetrySample) -> float:
+        if sample.lap_distance is not None:
+            return max(0.0, float(sample.lap_distance))
         if sample.session_time is not None:
             return max(0.0, float(sample.session_time))
         return max(0.0, float(sample.timestamp))
 
     def _sample_x(self, sample: TelemetrySample) -> float:
         absolute = self._sample_absolute_x(sample)
+        if sample.lap_distance is not None:
+            return absolute
         if self.first_x_value is None:
             return 0.0
         return max(0.0, absolute - self.first_x_value)
+
+    def _uses_distance_axis(self) -> bool:
+        return any(sample.lap_distance is not None for sample in self.samples)
 
     def _update_stats_label(self) -> None:
         latency = "--" if self.diagnostics.latest_latency_ms == 0.0 else f"{self.diagnostics.latest_latency_ms:.1f}"
