@@ -74,6 +74,15 @@ def make_lap_with_sectors(times: list[int], complete: bool) -> LapResult:
     return lap
 
 
+def table_row_by_lap(table, lap_number: int, status: str) -> int:
+    for row in range(table.rowCount()):
+        lap_item = table.item(row, 0)
+        status_item = table.item(row, 6)
+        if lap_item and status_item and lap_item.text() == str(lap_number) and status_item.text() == status:
+            return row
+    raise AssertionError(f"Row not found for lap={lap_number} status={status}")
+
+
 class PanelAndLapTests(unittest.TestCase):
     def setUp(self) -> None:
         app()
@@ -616,6 +625,83 @@ class PanelAndLapTests(unittest.TestCase):
         self.assertEqual(table.item(0, 3).text(), "00:43.000")
         self.assertEqual(table.item(0, 4).text(), "00:43.000")
         self.assertEqual(table.item(1, 0).text(), "2")
+        window.close()
+
+    def test_live_lap_table_updates_current_row_by_lap_number_after_sorting(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("live_lap_timing")
+        for lap_number, times in ((1, [42000, 43000, 43000]), (2, [41000, 42000, 43000]), (3, [40000, 41000, 42000])):
+            completed = make_lap_with_sectors(times, complete=True)
+            completed.lap_number = lap_number
+            window.handle_lap_completed(completed)
+        active = make_lap_with_sectors([], complete=False)
+        active.lap_number = 4
+        active.samples = [lap_sample(125.0, 15000, 0.1, 3, 0)]
+        window.handle_lap_updated(active)
+
+        table = window.live_lap_tables[-1]
+        table.setSortingEnabled(True)
+        table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        active.samples = [lap_sample(126.0, 25000, 0.2, 3, 0)]
+        window.handle_lap_updated(active)
+
+        active_row = table_row_by_lap(table, 4, "Current")
+        self.assertEqual(table.item(active_row, 1).text(), "00:25.000")
+        expected = {
+            1: ("00:42.000", "00:43.000", "00:43.000"),
+            2: ("00:41.000", "00:42.000", "00:43.000"),
+            3: ("00:40.000", "00:41.000", "00:42.000"),
+        }
+        for lap_number, sectors in expected.items():
+            row = table_row_by_lap(table, lap_number, "Complete")
+            self.assertEqual(tuple(table.item(row, column).text() for column in (2, 3, 4)), sectors)
+        window.close()
+
+    def test_live_lap_table_completion_reuses_current_row_without_duplicate(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("live_lap_timing")
+        active = make_lap_with_sectors([10000], complete=False)
+        active.lap_number = 2
+        active.samples = [lap_sample(10.0, 10000, 0.2, 1, 0)]
+        window.handle_lap_updated(active)
+
+        completed = make_lap_with_sectors([42000, 43000, 43000], complete=True)
+        completed.lap_number = 2
+        window.handle_lap_completed(completed)
+        next_active = make_lap_with_sectors([], complete=False)
+        next_active.lap_number = 3
+        next_active.samples = [lap_sample(129.0, 5000, 0.03, 2, 0)]
+        window.handle_lap_updated(next_active)
+
+        table = window.live_lap_tables[-1]
+        completed_rows = [
+            row
+            for row in range(table.rowCount())
+            if table.item(row, 0) and table.item(row, 0).text() == "2" and table.item(row, 6).text() == "Complete"
+        ]
+        self.assertEqual(len(completed_rows), 1)
+        row = completed_rows[0]
+        self.assertEqual(table.item(row, 1).text(), "02:08.000")
+        self.assertEqual(table.item(row, 2).text(), "00:42.000")
+        self.assertEqual(table.item(row, 4).text(), "00:43.000")
+        self.assertEqual(table.item(table_row_by_lap(table, 3, "Current"), 1).text(), "00:05.000")
+        window.close()
+
+    def test_live_lap_table_missing_values_use_safe_placeholder(self) -> None:
+        window = MainWindow(reset_layout=True)
+        window.create_panel_from_template("live_lap_timing")
+        active = make_lap_with_sectors([], complete=False)
+        active.lap_number = 7
+        active.samples = [TelemetrySample(current_lap_time_ms=None, current_sector_index=0)]
+
+        window.handle_lap_updated(active)
+        table = window.live_lap_tables[-1]
+        row = table_row_by_lap(table, 7, "Current")
+
+        self.assertEqual(table.item(row, 1).text(), "\u2014")
+        self.assertEqual(table.item(row, 2).text(), "\u2014")
+        self.assertNotEqual(table.item(row, 1).text(), "\ufffd")
+        self.assertNotEqual(table.item(row, 2).text(), "\ufffd")
         window.close()
 
     def test_invalid_lap_and_incomplete_stop_are_saved(self) -> None:

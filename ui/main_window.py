@@ -68,6 +68,10 @@ except ImportError:  # pragma: no cover
 
 
 LAYOUT_SCHEMA_VERSION = 2
+LIVE_LAP_NUMBER_ROLE = int(Qt.ItemDataRole.UserRole)
+LIVE_LAP_STATE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+LIVE_LAP_STATE_CURRENT = "current"
+LIVE_LAP_STATE_COMPLETED = "completed"
 
 
 class MainWindow(QMainWindow):
@@ -1404,6 +1408,7 @@ class MainWindow(QMainWindow):
     def _update_live_lap_tables_from_lap(self, lap: LapResult, complete: bool) -> None:
         sectors = {sector.sector_number: sector for sector in lap.sectors}
         current_sample = lap.samples[-1] if lap.samples else None
+        state = LIVE_LAP_STATE_COMPLETED if complete else LIVE_LAP_STATE_CURRENT
         row_values = [
             str(lap.lap_number),
             format_time_ms(lap.lap_time_ms if complete else (current_sample.current_lap_time_ms if current_sample else None)),
@@ -1417,48 +1422,122 @@ class MainWindow(QMainWindow):
             "Invalid" if not lap.valid else ("Complete" if complete else "Current"),
         ]
         for table in self.live_lap_tables:
-            row = table.rowCount() - 1
-            for column, value in enumerate(row_values):
-                item = table.item(row, column)
-                if item is None:
-                    item = QTableWidgetItem(value)
-                    table.setItem(row, column, item)
-                elif item.text() != value:
-                    item.setText(value)
-                if column in (2, 3, 4):
-                    sector = sectors.get(column - 1)
-                    self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
-            if complete:
-                table.insertRow(table.rowCount())
+            sorting_was_enabled = table.isSortingEnabled()
+            table.setSortingEnabled(False)
+            try:
+                row = self._live_lap_row_for_update(table, lap.lap_number, state)
+                self._write_live_lap_row(table, row, row_values, lap.lap_number, state, sectors)
+                if complete:
+                    self._ensure_live_lap_current_placeholder(table)
+            finally:
+                table.setSortingEnabled(sorting_was_enabled)
 
     def _refresh_completed_live_lap_rows(self) -> None:
         laps_by_number = {str(lap.lap_number): lap for lap in self.saved_laps}
         for table in self.live_lap_tables:
-            for row in range(max(0, table.rowCount() - 1)):
-                lap_item = table.item(row, 0)
-                lap = laps_by_number.get(lap_item.text() if lap_item is not None else "")
-                if lap is None:
-                    continue
-                sectors = {sector.sector_number: sector for sector in lap.sectors}
-                values = [
-                    str(lap.lap_number),
-                    format_time_ms(lap.lap_time_ms),
-                    format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
-                    format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
-                    format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
-                    format_delta_ms(completed_lap_delta_ms(lap, self.saved_laps), best_label=True),
-                    "Invalid" if not lap.valid else "Complete",
+            sorting_was_enabled = table.isSortingEnabled()
+            table.setSortingEnabled(False)
+            try:
+                rows = [
+                    row
+                    for row in range(table.rowCount())
+                    if self._live_lap_row_state(table, row) == LIVE_LAP_STATE_COMPLETED
                 ]
-                for column, value in enumerate(values):
-                    item = table.item(row, column)
-                    if item is None:
-                        item = QTableWidgetItem(value)
-                        table.setItem(row, column, item)
-                    else:
-                        item.setText(value)
-                    if column in (2, 3, 4):
-                        sector = sectors.get(column - 1)
-                        self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
+                for row in rows:
+                    lap_item = table.item(row, 0)
+                    lap = laps_by_number.get(lap_item.text() if lap_item is not None else "")
+                    if lap is None:
+                        continue
+                    sectors = {sector.sector_number: sector for sector in lap.sectors}
+                    values = [
+                        str(lap.lap_number),
+                        format_time_ms(lap.lap_time_ms),
+                        format_time_ms(sectors.get(1).time_ms if sectors.get(1) else None),
+                        format_time_ms(sectors.get(2).time_ms if sectors.get(2) else None),
+                        format_time_ms(sectors.get(3).time_ms if sectors.get(3) else None),
+                        format_delta_ms(completed_lap_delta_ms(lap, self.saved_laps), best_label=True),
+                        "Invalid" if not lap.valid else "Complete",
+                    ]
+                    self._write_live_lap_row(table, row, values, lap.lap_number, LIVE_LAP_STATE_COMPLETED, sectors)
+            finally:
+                table.setSortingEnabled(sorting_was_enabled)
+
+    def _live_lap_row_state(self, table: QTableWidget, row: int) -> str | None:
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        state = item.data(LIVE_LAP_STATE_ROLE)
+        return str(state) if state is not None else None
+
+    def _live_lap_row_number(self, table: QTableWidget, row: int) -> int | None:
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        value = item.data(LIVE_LAP_NUMBER_ROLE)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_empty_live_lap_row(self, table: QTableWidget, row: int) -> bool:
+        if self._live_lap_row_number(table, row) is not None or self._live_lap_row_state(table, row) is not None:
+            return False
+        lap_item = table.item(row, 0)
+        return lap_item is None or lap_item.text() in {"", "--", "\u2014"}
+
+    def _find_live_lap_row(self, table: QTableWidget, lap_number: int, state: str) -> int | None:
+        for row in range(table.rowCount()):
+            if self._live_lap_row_number(table, row) == lap_number and self._live_lap_row_state(table, row) == state:
+                return row
+        if state == LIVE_LAP_STATE_COMPLETED:
+            for row in range(table.rowCount()):
+                if self._live_lap_row_number(table, row) == lap_number and self._live_lap_row_state(table, row) == LIVE_LAP_STATE_CURRENT:
+                    return row
+        return None
+
+    def _live_lap_row_for_update(self, table: QTableWidget, lap_number: int, state: str) -> int:
+        existing = self._find_live_lap_row(table, lap_number, state)
+        if existing is not None:
+            return existing
+        for row in range(table.rowCount()):
+            if self._is_empty_live_lap_row(table, row):
+                return row
+        row = table.rowCount()
+        table.insertRow(row)
+        return row
+
+    def _write_live_lap_row(
+        self,
+        table: QTableWidget,
+        row: int,
+        values: list[str],
+        lap_number: int,
+        state: str,
+        sectors: dict[int, object],
+    ) -> None:
+        for column, value in enumerate(values):
+            item = table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem(value)
+                table.setItem(row, column, item)
+            elif item.text() != value:
+                item.setText(value)
+            item.setData(LIVE_LAP_NUMBER_ROLE, lap_number)
+            item.setData(LIVE_LAP_STATE_ROLE, state)
+            if column in (2, 3, 4):
+                sector = sectors.get(column - 1)
+                self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
+
+    def _ensure_live_lap_current_placeholder(self, table: QTableWidget) -> None:
+        for row in range(table.rowCount()):
+            if self._live_lap_row_state(table, row) == LIVE_LAP_STATE_CURRENT:
+                return
+            if self._is_empty_live_lap_row(table, row):
+                return
+        row = table.rowCount()
+        table.insertRow(row)
+        for column, value in enumerate(["--", "--", "--", "--", "--", "--", "Current"]):
+            table.setItem(row, column, QTableWidgetItem(value))
 
     def _update_sector_tables_from_lap(self, lap: LapResult) -> None:
         sectors = {sector.sector_number: sector for sector in lap.sectors}
