@@ -68,6 +68,14 @@ except ImportError:  # pragma: no cover
 
 
 LAYOUT_SCHEMA_VERSION = 2
+LIVE_LAP_COL_LAP_NUMBER = 0
+LIVE_LAP_COL_LAP_TIME = 1
+LIVE_LAP_COL_SECTOR_1 = 2
+LIVE_LAP_COL_SECTOR_2 = 3
+LIVE_LAP_COL_SECTOR_3 = 4
+LIVE_LAP_COL_DELTA = 5
+LIVE_LAP_COL_STATUS = 6
+LIVE_LAP_SECTOR_COLUMNS = (LIVE_LAP_COL_SECTOR_1, LIVE_LAP_COL_SECTOR_2, LIVE_LAP_COL_SECTOR_3)
 LIVE_LAP_NUMBER_ROLE = int(Qt.ItemDataRole.UserRole)
 LIVE_LAP_STATE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 LIVE_LAP_STATE_CURRENT = "current"
@@ -882,7 +890,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _create_live_lap_timing_widget(self) -> QWidget:
-        table = QTableWidget(1, 7, self)
+        table = QTableWidget(1, LIVE_LAP_COL_STATUS + 1, self)
         table.setHorizontalHeaderLabels(["Lap", "Lap time", "Sector 1", "Sector 2", "Sector 3", "Delta", "Status"])
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1433,7 +1441,7 @@ class MainWindow(QMainWindow):
                 table.setSortingEnabled(sorting_was_enabled)
 
     def _refresh_completed_live_lap_rows(self) -> None:
-        laps_by_number = {str(lap.lap_number): lap for lap in self.saved_laps}
+        laps_by_number = {lap.lap_number: lap for lap in self.saved_laps}
         for table in self.live_lap_tables:
             sorting_was_enabled = table.isSortingEnabled()
             table.setSortingEnabled(False)
@@ -1444,8 +1452,8 @@ class MainWindow(QMainWindow):
                     if self._live_lap_row_state(table, row) == LIVE_LAP_STATE_COMPLETED
                 ]
                 for row in rows:
-                    lap_item = table.item(row, 0)
-                    lap = laps_by_number.get(lap_item.text() if lap_item is not None else "")
+                    lap_number = self._live_lap_row_number(table, row)
+                    lap = laps_by_number.get(lap_number) if lap_number is not None else None
                     if lap is None:
                         continue
                     sectors = {sector.sector_number: sector for sector in lap.sectors}
@@ -1524,8 +1532,8 @@ class MainWindow(QMainWindow):
                 item.setText(value)
             item.setData(LIVE_LAP_NUMBER_ROLE, lap_number)
             item.setData(LIVE_LAP_STATE_ROLE, state)
-            if column in (2, 3, 4):
-                sector = sectors.get(column - 1)
+            if column in LIVE_LAP_SECTOR_COLUMNS:
+                sector = sectors.get(column - LIVE_LAP_COL_LAP_TIME)
                 self._style_timing_item(item, sector.comparison_status if sector else "UNAVAILABLE")
 
     def _ensure_live_lap_current_placeholder(self, table: QTableWidget) -> None:

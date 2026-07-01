@@ -20,7 +20,7 @@ from telemetry.lap_comparison import (
 )
 from telemetry.lap_storage import LapStorage
 from telemetry.lap_tracker import TimingState, LapTracker
-from ui.main_window import MainWindow
+from ui.main_window import LIVE_LAP_NUMBER_ROLE, LIVE_LAP_STATE_COMPLETED, LIVE_LAP_STATE_CURRENT, LIVE_LAP_STATE_ROLE, MainWindow
 
 
 def app() -> QApplication:
@@ -81,6 +81,24 @@ def table_row_by_lap(table, lap_number: int, status: str) -> int:
         if lap_item and status_item and lap_item.text() == str(lap_number) and status_item.text() == status:
             return row
     raise AssertionError(f"Row not found for lap={lap_number} status={status}")
+
+
+def assert_lap_row_key(testcase: unittest.TestCase, table, row: int, lap_number: int, state: str) -> None:
+    item = table.item(row, 0)
+    testcase.assertIsNotNone(item)
+    testcase.assertEqual(item.data(LIVE_LAP_NUMBER_ROLE), lap_number)
+    testcase.assertEqual(item.data(LIVE_LAP_STATE_ROLE), state)
+
+
+def assert_unique_lap_rows(testcase: unittest.TestCase, table) -> None:
+    seen: set[tuple[int, str]] = set()
+    for row in range(table.rowCount()):
+        item = table.item(row, 0)
+        if item is None or item.data(LIVE_LAP_NUMBER_ROLE) is None:
+            continue
+        key = (int(item.data(LIVE_LAP_NUMBER_ROLE)), str(item.data(LIVE_LAP_STATE_ROLE)))
+        testcase.assertNotIn(key, seen)
+        seen.add(key)
 
 
 class PanelAndLapTests(unittest.TestCase):
@@ -625,6 +643,9 @@ class PanelAndLapTests(unittest.TestCase):
         self.assertEqual(table.item(0, 3).text(), "00:43.000")
         self.assertEqual(table.item(0, 4).text(), "00:43.000")
         self.assertEqual(table.item(1, 0).text(), "2")
+        assert_lap_row_key(self, table, 0, 1, LIVE_LAP_STATE_COMPLETED)
+        assert_lap_row_key(self, table, 1, 2, LIVE_LAP_STATE_CURRENT)
+        assert_unique_lap_rows(self, table)
         window.close()
 
     def test_live_lap_table_updates_current_row_by_lap_number_after_sorting(self) -> None:
@@ -647,6 +668,7 @@ class PanelAndLapTests(unittest.TestCase):
 
         active_row = table_row_by_lap(table, 4, "Current")
         self.assertEqual(table.item(active_row, 1).text(), "00:25.000")
+        assert_lap_row_key(self, table, active_row, 4, LIVE_LAP_STATE_CURRENT)
         expected = {
             1: ("00:42.000", "00:43.000", "00:43.000"),
             2: ("00:41.000", "00:42.000", "00:43.000"),
@@ -655,6 +677,8 @@ class PanelAndLapTests(unittest.TestCase):
         for lap_number, sectors in expected.items():
             row = table_row_by_lap(table, lap_number, "Complete")
             self.assertEqual(tuple(table.item(row, column).text() for column in (2, 3, 4)), sectors)
+            assert_lap_row_key(self, table, row, lap_number, LIVE_LAP_STATE_COMPLETED)
+        assert_unique_lap_rows(self, table)
         window.close()
 
     def test_live_lap_table_completion_reuses_current_row_without_duplicate(self) -> None:
@@ -681,10 +705,14 @@ class PanelAndLapTests(unittest.TestCase):
         ]
         self.assertEqual(len(completed_rows), 1)
         row = completed_rows[0]
+        assert_lap_row_key(self, table, row, 2, LIVE_LAP_STATE_COMPLETED)
         self.assertEqual(table.item(row, 1).text(), "02:08.000")
         self.assertEqual(table.item(row, 2).text(), "00:42.000")
         self.assertEqual(table.item(row, 4).text(), "00:43.000")
-        self.assertEqual(table.item(table_row_by_lap(table, 3, "Current"), 1).text(), "00:05.000")
+        current_row = table_row_by_lap(table, 3, "Current")
+        assert_lap_row_key(self, table, current_row, 3, LIVE_LAP_STATE_CURRENT)
+        self.assertEqual(table.item(current_row, 1).text(), "00:05.000")
+        assert_unique_lap_rows(self, table)
         window.close()
 
     def test_live_lap_table_missing_values_use_safe_placeholder(self) -> None:
