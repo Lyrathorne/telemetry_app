@@ -1085,23 +1085,38 @@ class MainWindow(QMainWindow):
             labels["delta"].setText(format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)))
 
     def _update_live_lap_template_panels(self, sample: TelemetrySample) -> None:
+        if sample.lap_number is None:
+            return
+        lap_number = int(sample.lap_number)
         for table in self.live_lap_tables:
-            row = table.rowCount() - 1
-            values = [
-                "--" if sample.lap_number is None else str(sample.lap_number),
-                format_time_ms(sample.current_lap_time_ms),
-                "--",
-                "--",
-                "--",
-                format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)),
-                "Invalid" if sample.invalid_lap else ("Pit" if sample.in_pit else "Current"),
-            ]
-            for column, value in enumerate(values):
-                item = table.item(row, column)
-                if item is None:
-                    table.setItem(row, column, QTableWidgetItem(value))
-                elif item.text() != value:
-                    item.setText(value)
+            sorting_was_enabled = table.isSortingEnabled()
+            table.setSortingEnabled(False)
+            try:
+                row = self._live_lap_row_for_update(table, lap_number, LIVE_LAP_STATE_CURRENT)
+                updates = {
+                    LIVE_LAP_COL_LAP_NUMBER: str(lap_number),
+                    LIVE_LAP_COL_LAP_TIME: format_time_ms(sample.current_lap_time_ms),
+                    LIVE_LAP_COL_DELTA: format_delta_ms(live_lap_delta_ms(self.lap_tracker.active_lap, self.saved_laps)),
+                    LIVE_LAP_COL_STATUS: "Invalid" if sample.invalid_lap else ("Pit" if sample.in_pit else "Current"),
+                }
+                for column, value in updates.items():
+                    item = table.item(row, column)
+                    if item is None:
+                        item = QTableWidgetItem(value)
+                        table.setItem(row, column, item)
+                    elif item.text() != value:
+                        item.setText(value)
+                    item.setData(LIVE_LAP_NUMBER_ROLE, lap_number)
+                    item.setData(LIVE_LAP_STATE_ROLE, LIVE_LAP_STATE_CURRENT)
+                for column in LIVE_LAP_SECTOR_COLUMNS:
+                    item = table.item(row, column)
+                    if item is None:
+                        item = QTableWidgetItem(format_time_ms(None))
+                        table.setItem(row, column, item)
+                    item.setData(LIVE_LAP_NUMBER_ROLE, lap_number)
+                    item.setData(LIVE_LAP_STATE_ROLE, LIVE_LAP_STATE_CURRENT)
+            finally:
+                table.setSortingEnabled(sorting_was_enabled)
 
     def _update_sector_template_panels(self, sample: TelemetrySample) -> None:
         current = sample.current_sector_index
