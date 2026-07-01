@@ -1,71 +1,78 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+import os
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 
-block_cipher = None
-datas = collect_data_files("PySide6", include_py_files=False)
-datas += [("resources", "resources")]
+ROOT = Path(SPECPATH)
+
+datas = []
+resources_dir = ROOT / "resources"
+if resources_dir.exists():
+    datas.append((str(resources_dir), "resources"))
+datas += collect_data_files("PySide6", include_py_files=False)
+datas += collect_data_files("pyqtgraph", include_py_files=False)
+datas += collect_data_files("numpy", include_py_files=False)
+
 binaries = collect_dynamic_libs("PySide6")
+binaries += collect_dynamic_libs("numpy")
+
+hiddenimports = []
+for package in ("app", "telemetry", "ui", "storage", "collectors", "parsers"):
+    hiddenimports += collect_submodules(package)
+hiddenimports += [
+    "numpy",
+    "pyqtgraph",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
+    "telemetry.assetto_corsa",
+    "telemetry.assetto_corsa_competizione",
+    "telemetry.demo",
+    "telemetry.f1_2018",
+]
 
 a = Analysis(
     ["main.py"],
-    pathex=[],
+    pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=sorted(set(hiddenimports)),
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    runtime_hooks=[str(ROOT / "runtime_hooks" / "pyi_rth_qt_paths.py")],
+    excludes=["pytest", "unittest", "tests"],
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
-debug_exe = EXE(
+CONFIGURATION = os.environ.get("RT_BUILD_CONFIGURATION", "Release").lower()
+IS_DEBUG = CONFIGURATION == "debug"
+TARGET_NAME = "RacingTelemetry-debug" if IS_DEBUG else "RacingTelemetry"
+
+exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
-    name="RacingTelemetry-debug",
+    exclude_binaries=True,
+    name=TARGET_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
+    upx=False,
+    console=IS_DEBUG,
     disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
 )
 
-release_exe = EXE(
-    pyz,
-    a.scripts,
+coll = COLLECT(
+    exe,
     a.binaries,
     a.zipfiles,
     a.datas,
-    [],
-    name="RacingTelemetry",
-    debug=False,
-    bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    upx=False,
+    name=TARGET_NAME,
 )

@@ -1,10 +1,10 @@
 import sys
-import traceback
 import logging
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import APP_NAME
+from app.crash_report import write_crash_report
 from app.logging_config import configure_logging
 
 
@@ -16,6 +16,11 @@ def main() -> int:
             from app.diagnostics import run_diagnostics
 
             return run_diagnostics()
+
+        if "--smoke-test" in sys.argv:
+            from app.smoke import run_smoke_test
+
+            return run_smoke_test()
 
         from ui.main_window import MainWindow
 
@@ -37,10 +42,10 @@ def main() -> int:
         logging.info("Application shutdown complete with exit code %s", exit_code)
         return exit_code
     except Exception as error:
-        traceback_text = "".join(traceback.format_exception(error))
+        crash_path = write_crash_report(error)
         with log_path.open("a", encoding="utf-8") as log_file:
             log_file.write("\nUnhandled startup error\n")
-            log_file.write(traceback_text)
+            log_file.write(f"Crash report: {crash_path}\n")
 
         app = QApplication.instance()
         if app is None:
@@ -49,7 +54,7 @@ def main() -> int:
         QMessageBox.critical(
             None,
             "Racing Telemetry startup error",
-            f"Racing Telemetry could not start.\n\n{error}\n\nLog file:\n{log_path}",
+            f"Racing Telemetry could not start.\n\n{error}\n\nLog file:\n{log_path}\nCrash report:\n{crash_path}",
         )
         return 1
 

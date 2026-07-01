@@ -1,3 +1,9 @@
+param(
+    [ValidateSet("Debug", "Release")]
+    [string] $Configuration = "Release",
+    [switch] $SkipTests
+)
+
 $ErrorActionPreference = "Stop"
 
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -6,24 +12,30 @@ Set-Location -LiteralPath $script:Root
 $script:AppName = "RacingTelemetry"
 $script:BuildDir = Join-Path $script:Root "build_new"
 $script:DistDir = Join-Path $script:Root "dist_new"
-$script:FinalBuildDir = Join-Path $script:Root "build"
 $script:FinalDistDir = Join-Path $script:Root "dist"
 $script:PreviousDistDir = Join-Path $script:Root "dist_previous"
-$script:DebugExe = Join-Path $script:FinalDistDir "$script:AppName-debug.exe"
-$script:ReleaseExe = Join-Path $script:FinalDistDir "$script:AppName.exe"
+$script:SmokeRoot = Join-Path $script:Root "build_smoke_test"
+$script:ReleaseRoot = Join-Path $script:Root "release"
 $script:LogDir = Join-Path $script:Root "build_logs"
 $script:Stage = "initialization"
 
 New-Item -ItemType Directory -Force -Path $script:LogDir | Out-Null
-$script:LogPath = Join-Path $script:LogDir ("build-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$script:LogPath = Join-Path $script:LogDir ("build-{0}-{1}.log" -f $Configuration.ToLowerInvariant(), (Get-Date -Format "yyyyMMdd-HHmmss"))
 
-Start-Transcript -Path $script:LogPath -Force | Out-Null
+function Write-Log {
+    param(
+        [string] $Message = "",
+        [ConsoleColor] $Color = [ConsoleColor]::Gray
+    )
+    Write-Host $Message -ForegroundColor $Color
+    Add-Content -LiteralPath $script:LogPath -Value $Message -Encoding UTF8
+}
 
 function Write-Stage {
     param([string] $Name)
     $script:Stage = $Name
-    Write-Host ""
-    Write-Host "== $Name =="
+    Write-Log ""
+    Write-Log "== $Name ==" Cyan
 }
 
 function Fail-Build {
@@ -31,70 +43,103 @@ function Fail-Build {
         [string] $Message,
         [int] $Code = 1
     )
-    Write-Host ""
-    Write-Host "Build failed during: $script:Stage"
-    Write-Host $Message
-    Write-Host "Log: $script:LogPath"
-    Write-Host "Expected debug executable: $script:DebugExe"
-    Write-Host "Expected release executable: $script:ReleaseExe"
-    Write-Host "Existing dist contents:"
+    Write-Log ""
+    Write-Log "Build failed during: $script:Stage" Red
+    Write-Log $Message Red
+    Write-Log "Log: $script:LogPath"
     if (Test-Path -LiteralPath $script:FinalDistDir) {
-        Get-ChildItem -Force -LiteralPath $script:FinalDistDir | Format-Table Name, Length, LastWriteTime
+        Write-Log "Existing dist was preserved: $script:FinalDistDir"
     } else {
-        Write-Host "dist does not exist."
+        Write-Log "dist does not exist."
     }
-    Write-Host "Temporary output contents:"
     if (Test-Path -LiteralPath $script:DistDir) {
-        Get-ChildItem -Force -LiteralPath $script:DistDir | Format-Table Name, Length, LastWriteTime
+        Write-Log "Temporary dist_new was preserved for diagnostics: $script:DistDir"
     } else {
-        Write-Host "dist_new does not exist."
+        Write-Log "dist_new does not exist."
     }
-    Stop-Transcript | Out-Null
     exit $Code
 }
 
-function Invoke-CommandChecked {
+function Invoke-External {
     param(
         [string] $Name,
         [string] $FilePath,
-        [string[]] $Arguments = @()
+        $Arguments = @(),
+        $ExtraEnvironment = @{}
     )
+
     Write-Stage $Name
-    Write-Host "> $FilePath $($Arguments -join ' ')"
-    & $FilePath @Arguments
-    $exitCode = if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE } else { 0 }
+    $argumentList = @($Arguments)
+    $environmentMap = @{}
+    if ($ExtraEnvironment -is [hashtable]) {
+        $environmentMap = $ExtraEnvironment
+    }
+    Write-Log ("> {0} {1}" -f $FilePath, ($Arguments -join " "))
+
+    $stdoutPath = Join-Path $script:LogDir ("{0}-{1}-stdout.log" -f (Get-Date -Format "yyyyMMdd-HHmmssfff"), ($Name -replace '[^A-Za-z0-9_-]', '_'))
+    $stderrPath = Join-Path $script:LogDir ("{0}-{1}-stderr.log" -f (Get-Date -Format "yyyyMMdd-HHmmssfff"), ($Name -replace '[^A-Za-z0-9_-]', '_'))
+    $oldEnvironment = @{}
+    foreach ($key in $environmentMap.Keys) {
+        $oldEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        [Environment]::SetEnvironmentVariable($key, [string] $environmentMap[$key], "Process")
+    }
+
+    try {
+        $process = Start-Process -FilePath $FilePath `
+            -ArgumentList (Join-ProcessArguments $argumentList) `
+            -WorkingDirectory $script:Root `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+        $exitCode = $process.ExitCode
+    } finally {
+        foreach ($key in $oldEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $oldEnvironment[$key], "Process")
+        }
+    }
+
+    if (Test-Path -LiteralPath $stdoutPath) {
+        $stdoutLines = Get-Content -LiteralPath $stdoutPath -Encoding UTF8
+        foreach ($line in $stdoutLines) {
+            Write-Host $line
+            Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+        }
+    }
+    if (Test-Path -LiteralPath $stderrPath) {
+        $stderrLines = Get-Content -LiteralPath $stderrPath -Encoding UTF8
+        foreach ($line in $stderrLines) {
+            Write-Host $line -ForegroundColor Yellow
+            Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8
+        }
+    }
+
+    Write-Log "$Name exited with code $exitCode."
     if ($exitCode -ne 0) {
         Fail-Build "$Name exited with code $exitCode." $exitCode
     }
 }
 
-function Stop-RunningBuiltExecutables {
-    Write-Stage "stop running built executables"
-    $targets = @(
-        (Join-Path $script:FinalDistDir "$script:AppName.exe"),
-        (Join-Path $script:FinalDistDir "$script:AppName-debug.exe")
-    )
-    $running = Get-CimInstance Win32_Process -Filter "name = '$script:AppName.exe' or name = '$script:AppName-debug.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $targets -contains $_.ExecutablePath }
-    foreach ($process in $running) {
-        Write-Host "Stopping running executable: $($process.ExecutablePath) pid=$($process.ProcessId)"
-        try {
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
-        } catch {
-            Write-Host "Could not stop process $($process.ProcessId): $($_.Exception.Message)"
+function Join-ProcessArguments {
+    param($Arguments)
+    $quoted = @()
+    foreach ($argument in @($Arguments)) {
+        $value = [string] $argument
+        if ($value -match '[\s"]') {
+            $quoted += '"' + ($value -replace '"', '\"') + '"'
+        } else {
+            $quoted += $value
         }
     }
-    if (-not $running) {
-        Write-Host "No running built executable found."
-    }
-    Start-Sleep -Seconds 3
+    return ($quoted -join " ")
 }
 
 function Invoke-WithRetry {
     param(
         [scriptblock] $Action,
         [string] $Description,
-        [int] $Attempts = 8,
+        [int] $Attempts = 6,
         [int] $DelaySeconds = 2
     )
     $lastError = $null
@@ -104,7 +149,7 @@ function Invoke-WithRetry {
             return
         } catch {
             $lastError = $_
-            Write-Host "$Description failed on attempt $attempt/${Attempts}: $($_.Exception.Message)"
+            Write-Log "$Description failed on attempt $attempt/${Attempts}: $($_.Exception.Message)" Yellow
             if ($attempt -lt $Attempts) {
                 Start-Sleep -Seconds $DelaySeconds
             }
@@ -113,7 +158,93 @@ function Invoke-WithRetry {
     throw $lastError
 }
 
+function Get-ProjectPython {
+    $venvPython = Join-Path $script:Root ".venv\Scripts\python.exe"
+    $legacyVenvPython = Join-Path $script:Root ".venv.venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPython) {
+        return $venvPython
+    }
+    if (Test-Path -LiteralPath $legacyVenvPython) {
+        return $legacyVenvPython
+    }
+
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $pythonCommand) {
+        Fail-Build "Python was not found. Build the release on a development machine with Python installed."
+    }
+    if ($pythonCommand.Source -like "*WindowsApps*") {
+        Fail-Build "Refusing to create .venv from WindowsApps python shim: $($pythonCommand.Source)"
+    }
+    Write-Log "No project .venv was found. Creating .venv with: $($pythonCommand.Source)"
+    Invoke-External -Name "create .venv" -FilePath $pythonCommand.Source -Arguments @("-m", "venv", ".venv")
+    return $venvPython
+}
+
+function Stop-RunningBuiltExecutables {
+    Write-Stage "stop running built executables"
+    $targets = @(
+        (Join-Path $script:FinalDistDir "$script:AppName\$script:AppName.exe"),
+        (Join-Path $script:FinalDistDir "$script:AppName-debug\$script:AppName-debug.exe")
+    )
+    $running = Get-CimInstance Win32_Process -Filter "name = '$script:AppName.exe' or name = '$script:AppName-debug.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $targets -contains $_.ExecutablePath }
+    foreach ($process in $running) {
+        Write-Log "Stopping running executable: $($process.ExecutablePath) pid=$($process.ProcessId)"
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $running) {
+        Write-Log "No running built executable found."
+    }
+}
+
+function New-Readme {
+    param([string] $AppDir)
+    $text = @"
+Racing Telemetry for Windows x64
+
+1. Extract the ZIP completely.
+2. Do not move RacingTelemetry.exe away from the _internal folder.
+3. Run RacingTelemetry.exe.
+4. Python, pip, PyInstaller, PySide6, NumPy and pyqtgraph do not need to be installed on the target PC.
+5. Windows SmartScreen can warn about unsigned apps. Open additional details only if this archive came from a trusted source.
+6. User data is stored in %LOCALAPPDATA%\RacingTelemetry:
+   - data\racing_telemetry.sqlite3
+   - logs\racing_telemetry.log
+   - settings\
+   - exports\
+7. If the app crashes before the window appears, check %LOCALAPPDATA%\RacingTelemetry\logs\crash-*.log.
+
+The whole RacingTelemetry folder is the application. Copying only the EXE is not supported.
+"@
+    Set-Content -LiteralPath (Join-Path $AppDir "README.txt") -Value $text -Encoding UTF8
+}
+
+function Invoke-SmokeTest {
+    param(
+        [string] $SourceAppDir,
+        [string] $ExeName
+    )
+    Write-Stage "smoke test"
+    if (Test-Path -LiteralPath $script:SmokeRoot) {
+        Remove-Item -LiteralPath $script:SmokeRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $script:SmokeRoot | Out-Null
+    $smokeAppDir = Join-Path $script:SmokeRoot (Split-Path -Leaf $SourceAppDir)
+    Copy-Item -LiteralPath $SourceAppDir -Destination $smokeAppDir -Recurse -Force
+    $smokeExe = Join-Path $smokeAppDir $ExeName
+    if (-not (Test-Path -LiteralPath $smokeExe)) {
+        Fail-Build "Smoke executable was not found: $smokeExe"
+    }
+    Push-Location -LiteralPath $script:SmokeRoot
+    try {
+        Invoke-External -Name "run packaged smoke test" -FilePath $smokeExe -Arguments @("--smoke-test")
+    } finally {
+        Pop-Location
+    }
+}
+
 function Replace-FinalDist {
+    param([string] $TargetFolderName)
     Write-Stage "replace final dist"
     Stop-RunningBuiltExecutables
 
@@ -121,63 +252,75 @@ function Replace-FinalDist {
         Invoke-WithRetry { Remove-Item -LiteralPath $script:PreviousDistDir -Recurse -Force -ErrorAction Stop } "Removing dist_previous"
     }
 
-    $movedOldDist = $false
-    if (Test-Path -LiteralPath $script:FinalDistDir) {
-        Invoke-WithRetry { Rename-Item -LiteralPath $script:FinalDistDir -NewName "dist_previous" -ErrorAction Stop } "Moving existing dist to dist_previous"
-        $movedOldDist = $true
+    New-Item -ItemType Directory -Force -Path $script:FinalDistDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $script:PreviousDistDir | Out-Null
+
+    $sourceTarget = Join-Path $script:DistDir $TargetFolderName
+    $finalTarget = Join-Path $script:FinalDistDir $TargetFolderName
+    $previousTarget = Join-Path $script:PreviousDistDir $TargetFolderName
+    if (-not (Test-Path -LiteralPath $sourceTarget)) {
+        throw "Temporary target folder was not found: $sourceTarget"
     }
 
+    $movedOldTarget = $false
+    if (Test-Path -LiteralPath $finalTarget) {
+        Invoke-WithRetry { Move-Item -LiteralPath $finalTarget -Destination $previousTarget -Force -ErrorAction Stop } "Moving existing target to dist_previous"
+        $movedOldTarget = $true
+    }
     try {
-        Invoke-WithRetry { Rename-Item -LiteralPath $script:DistDir -NewName "dist" -ErrorAction Stop } "Moving dist_new to dist"
+        Invoke-WithRetry { Move-Item -LiteralPath $sourceTarget -Destination $finalTarget -Force -ErrorAction Stop } "Moving new target to dist"
     } catch {
-        if ($movedOldDist -and (Test-Path -LiteralPath $script:PreviousDistDir) -and -not (Test-Path -LiteralPath $script:FinalDistDir)) {
-            Rename-Item -LiteralPath $script:PreviousDistDir -NewName "dist" -ErrorAction SilentlyContinue
+        if ($movedOldTarget -and (Test-Path -LiteralPath $previousTarget) -and -not (Test-Path -LiteralPath $finalTarget)) {
+            Move-Item -LiteralPath $previousTarget -Destination $finalTarget -Force -ErrorAction SilentlyContinue
         }
         throw
     }
 
-    if ($movedOldDist -and (Test-Path -LiteralPath $script:PreviousDistDir)) {
+    if (Test-Path -LiteralPath $script:PreviousDistDir) {
         Remove-Item -LiteralPath $script:PreviousDistDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    if (Test-Path -LiteralPath $script:DistDir) {
+        Remove-Item -LiteralPath $script:DistDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function New-ReleaseZip {
+    param([string] $AppDir)
+    Write-Stage "release zip"
+    New-Item -ItemType Directory -Force -Path $script:ReleaseRoot | Out-Null
+    $zipPath = Join-Path $script:ReleaseRoot "$script:AppName-Windows-x64.zip"
+    if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
+    }
+    Compress-Archive -LiteralPath $AppDir -DestinationPath $zipPath -Force
+    $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
+    Write-Log "ZIP: $zipPath"
+    Write-Log "SHA-256: $hash"
+    return $zipPath
 }
 
 try {
     Write-Stage "environment"
-    Write-Host "Project root: $script:Root"
-    Write-Host "Log: $script:LogPath"
-
-    $venvPython = Join-Path $script:Root ".venv\Scripts\python.exe"
-    $legacyVenvPython = Join-Path $script:Root ".venv.venv\Scripts\python.exe"
-
-    if (Test-Path -LiteralPath $venvPython) {
-        $python = $venvPython
-    } elseif (Test-Path -LiteralPath $legacyVenvPython) {
-        $python = $legacyVenvPython
-    } else {
-        $systemPython = Get-Command python -ErrorAction SilentlyContinue
-        if ($null -eq $systemPython) {
-            Fail-Build "Python was not found. Install Python 3.14 or copy/build from a machine with Python installed."
-        }
-        Write-Host "No project .venv was found. Creating .venv with: $($systemPython.Source)"
-        & $systemPython.Source -m venv ".venv"
-        if ($LASTEXITCODE -ne 0) {
-            Fail-Build "Could not create .venv. Python venv support may be missing." $LASTEXITCODE
-        }
-        $python = $venvPython
+    Write-Log "Project root: $script:Root"
+    Write-Log "Configuration: $Configuration"
+    Write-Log "Log: $script:LogPath"
+    if ($SkipTests) {
+        Write-Log "WARNING: Tests were skipped. This build is not fully validated." Yellow
     }
 
-    Write-Host "Using Python:"
-    & $python -c "import sys; print(sys.executable); print(sys.version)"
-    if ($LASTEXITCODE -ne 0) {
-        Fail-Build "Selected Python could not start." $LASTEXITCODE
-    }
+    $python = Get-ProjectPython
+    Invoke-External -Name "Python version" -FilePath $python -Arguments @("--version")
+    Invoke-External -Name "Python architecture" -FilePath $python -Arguments @("-c", "import struct; print(struct.calcsize('P') * 8)")
+    Invoke-External -Name "Python executable" -FilePath $python -Arguments @("-c", "import sys; print(sys.executable); print(sys.version)")
 
     Write-Stage "dependency check"
-    & $python -c "import PySide6, numpy, pyqtgraph, PyInstaller"
-    if ($LASTEXITCODE -ne 0) {
-        Invoke-CommandChecked "install project requirements" $python @("-m", "pip", "install", "-r", "requirements.txt", "-r", "requirements-dev.txt")
+    Invoke-External -Name "install project requirements" -FilePath $python -Arguments @("-m", "pip", "install", "-r", "requirements.txt", "-r", "requirements-dev.txt")
+    Invoke-External -Name "import runtime dependencies" -FilePath $python -Arguments @("-c", "import PySide6, numpy, pyqtgraph, PyInstaller")
+    Invoke-External -Name "PyInstaller version" -FilePath $python -Arguments @("-m", "PyInstaller", "--version")
+
+    if (-not $SkipTests) {
+        Invoke-External -Name "tests" -FilePath $python -Arguments @("-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v") -ExtraEnvironment @{ "QT_QPA_PLATFORM" = "offscreen" }
     }
-    Invoke-CommandChecked "PyInstaller version" $python @("-m", "PyInstaller", "--version")
 
     Write-Stage "cleanup temporary build folders"
     if (Test-Path -LiteralPath $script:BuildDir) {
@@ -187,56 +330,77 @@ try {
         Remove-Item -LiteralPath $script:DistDir -Recurse -Force
     }
 
-    $env:QT_QPA_PLATFORM = "offscreen"
-    Invoke-CommandChecked "test run" $python @("-m", "unittest", "discover", "-s", "tests")
-    Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
-
-    Invoke-CommandChecked "PyInstaller build" $python @(
-        "-m", "PyInstaller",
-        "--noconfirm",
-        "--clean",
-        "--workpath", $script:BuildDir,
-        "--distpath", $script:DistDir,
-        "RacingTelemetry.spec"
-    )
-
-    Write-Stage "verify temporary executables"
-    $tempDebugExe = Join-Path $script:DistDir "$script:AppName-debug.exe"
-    $tempReleaseExe = Join-Path $script:DistDir "$script:AppName.exe"
-    if (-not (Test-Path -LiteralPath $tempDebugExe)) {
-        Fail-Build "Build finished, but debug executable was not found: $tempDebugExe"
+    $env:RT_BUILD_CONFIGURATION = $Configuration
+    try {
+        Invoke-External -Name "PyInstaller build" -FilePath $python -Arguments @(
+            "-m", "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--workpath", $script:BuildDir,
+            "--distpath", $script:DistDir,
+            "RacingTelemetry.spec"
+        ) -ExtraEnvironment @{ "RT_BUILD_CONFIGURATION" = $Configuration }
+    } finally {
+        Remove-Item Env:\RT_BUILD_CONFIGURATION -ErrorAction SilentlyContinue
     }
-    if (-not (Test-Path -LiteralPath $tempReleaseExe)) {
-        Fail-Build "Build finished, but release executable was not found: $tempReleaseExe"
+
+    Write-Stage "verify temporary package"
+    $targetFolderName = if ($Configuration -eq "Debug") { "$script:AppName-debug" } else { $script:AppName }
+    $targetExeName = if ($Configuration -eq "Debug") { "$script:AppName-debug.exe" } else { "$script:AppName.exe" }
+    $tempAppDir = Join-Path $script:DistDir $targetFolderName
+    $tempExe = Join-Path $tempAppDir $targetExeName
+    if (-not (Test-Path -LiteralPath $tempExe)) {
+        Fail-Build "Build finished, but executable was not found: $tempExe"
     }
-    Get-ChildItem -Force -LiteralPath $script:DistDir | Format-Table Name, Length, LastWriteTime
+    if (-not (Test-Path -LiteralPath (Join-Path $tempAppDir "_internal"))) {
+        Fail-Build "Build finished, but _internal folder was not found in: $tempAppDir"
+    }
+    New-Readme $tempAppDir
+    Get-ChildItem -Force -LiteralPath $tempAppDir | ForEach-Object { Write-Log ("{0} {1}" -f $_.Name, $_.Length) }
 
-    Replace-FinalDist
+    Invoke-SmokeTest $tempAppDir $targetExeName
 
-    if (Test-Path -LiteralPath $script:FinalBuildDir) {
-        Remove-Item -LiteralPath $script:FinalBuildDir -Recurse -Force
+    Replace-FinalDist $targetFolderName
+
+    if (Test-Path -LiteralPath (Join-Path $script:Root "build")) {
+        Remove-Item -LiteralPath (Join-Path $script:Root "build") -Recurse -Force
     }
     if (Test-Path -LiteralPath $script:BuildDir) {
         Rename-Item -LiteralPath $script:BuildDir -NewName "build"
     }
 
-    Write-Stage "final executable verification"
-    if (-not (Test-Path -LiteralPath $script:DebugExe)) {
-        Fail-Build "Final debug executable was not found after replacing dist."
+    $finalAppDir = Join-Path $script:FinalDistDir $targetFolderName
+    $finalExe = Join-Path $finalAppDir $targetExeName
+    if (-not (Test-Path -LiteralPath $finalExe)) {
+        Fail-Build "Final executable was not found after replacing dist: $finalExe"
     }
-    if (-not (Test-Path -LiteralPath $script:ReleaseExe)) {
-        Fail-Build "Final release executable was not found after replacing dist."
-    }
-    Get-ChildItem -Force -LiteralPath $script:FinalDistDir | Format-Table Name, Length, LastWriteTime
 
-    Write-Host ""
-    Write-Host "Build succeeded."
-    Write-Host "Debug executable: $script:DebugExe"
-    Write-Host "Release executable: $script:ReleaseExe"
-    Write-Host "Log: $script:LogPath"
-    Stop-Transcript | Out-Null
+    if ($Configuration -eq "Release") {
+        $zipPath = New-ReleaseZip $finalAppDir
+        Write-Stage "smoke test extracted zip"
+        $extractRoot = Join-Path $script:Root "release_smoke_test"
+        if (Test-Path -LiteralPath $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+        $extractedExe = Join-Path $extractRoot "$script:AppName\$script:AppName.exe"
+        Push-Location -LiteralPath $extractRoot
+        try {
+            Invoke-External -Name "run extracted release smoke test" -FilePath $extractedExe -Arguments @("--smoke-test")
+        } finally {
+            Pop-Location
+        }
+    }
+
+    Write-Stage "summary"
+    Write-Log "Build succeeded."
+    Write-Log "Executable: $finalExe"
+    if ($Configuration -eq "Release") {
+        Write-Log "ZIP: $(Join-Path $script:ReleaseRoot "$script:AppName-Windows-x64.zip")"
+    }
+    Write-Log "Log: $script:LogPath"
     exit 0
 } catch {
-    Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
     Fail-Build $_.Exception.Message 1
 }

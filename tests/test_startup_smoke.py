@@ -87,6 +87,13 @@ class StartupSmokeTests(unittest.TestCase):
                 self.assertTrue(paths.exports_dir().is_dir())
                 self.assertTrue(paths.settings_dir().is_dir())
 
+    def test_smoke_test_entrypoint_initializes_core_app(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmpdir}):
+                from app.smoke import run_smoke_test
+
+                self.assertEqual(run_smoke_test(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
